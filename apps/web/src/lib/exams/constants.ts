@@ -1,0 +1,28 @@
+export const COURSE_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"] as const;
+
+// The question_type enum in the DB also has 'listening', but this app
+// treats "listening" as an attribute (a question with audio attached),
+// not a distinct authorable type - so it's deliberately left out of this
+// list. See CLAUDE.md for the reasoning.
+export const QUESTION_TYPES = [
+  { value: "multiple_choice", label: "Multiple choice" },
+  { value: "true_false", label: "True / False" },
+  { value: "short_answer", label: "Short answer" },
+  { value: "writing", label: "Writing" },
+  { value: "speaking", label: "Speaking" },
+] as const;
+
+export type QuestionType = (typeof QUESTION_TYPES)[number]["value"];
+
+// multiple_choice/true_false/short_answer can be graded automatically by
+// comparing a stored correct_answer; writing/speaking need a teacher to
+// read/listen and score them - correct_answer stays null for those.
+export const AUTO_GRADED_TYPES = new Set<QuestionType>([
+  "multiple_choice",
+  "true_false",
+  "short_answer",
+]);
+
+export function isAutoGraded(type: string): boolean {
+  return AUTO_GRADED_TYPES.has(type as QuestionType);
+}

@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Turborepo
+.turbo/
+
+# Next.js
+.next/
+out/
+
+# Environment variables
+.env
+.env*.local
+
+# Build output
+dist/
+build/
+
+# Editor / OS
+.DS_Store
+*.log
+
+# Vercel
+.vercel

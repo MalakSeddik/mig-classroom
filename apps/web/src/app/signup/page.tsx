@@ -1,0 +1,79 @@
+"use client";
+
+import { useActionState } from "react";
+import Link from "next/link";
+import { signup, type SignupState } from "./actions";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+
+const initialState: SignupState = { error: null, message: null };
+
+export default function SignupPage() {
+  const [state, formAction, pending] = useActionState(signup, initialState);
+
+  return (
+    <div className="flex flex-1 items-center justify-center px-4 py-12">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Create your account</CardTitle>
+          <CardDescription>Join MIG Classroom as a student.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form action={formAction} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="fullName">Full name</Label>
+              <Input id="fullName" name="fullName" autoComplete="name" required />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                required
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete="new-password"
+                minLength={6}
+                required
+              />
+            </div>
+
+            {state.error && (
+              <p className="text-sm text-destructive">{state.error}</p>
+            )}
+            {state.message && (
+              <p className="text-sm text-muted-foreground">{state.message}</p>
+            )}
+
+            <Button type="submit" disabled={pending}>
+              {pending ? "Creating account..." : "Sign up"}
+            </Button>
+          </form>
+
+          <p className="mt-4 text-sm text-muted-foreground">
+            Already have an account?{" "}
+            <Link href="/login" className="text-accent hover:underline">
+              Log in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
