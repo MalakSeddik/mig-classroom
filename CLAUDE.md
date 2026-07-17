@@ -112,14 +112,15 @@ applied to the remote project. Row-Level Security is enabled on every
 table; real role-based policies were added in Step 3 part 2 — see
 "Access model (RLS)" below.
 
-Tables (14 total):
+Tables (15 total — 14 from the initial schema plus `assignment_materials`,
+added in Step 4 part 2):
 
 | Group | Tables |
 |---|---|
 | People & courses | `profiles` (links to `auth.users`, role enum student/teacher/admin), `courses` (level enum A1–C1), `classes` (course + teacher + dates), `enrollments` (student ↔ class, unique per pair) |
-| Coursework | `assignments`, `submissions` (one per student+assignment), `grades` (one per submission) |
+| Coursework | `assignments` (+ `assignment_materials` for teacher-attached files, Step 4 part 2), `submissions` (one per student+assignment; `file_path`/`file_name` for an attached file, renamed from `file_url` in Step 4 part 2), `grades` (one per submission) |
 | Attendance | `class_sessions`, `attendance` (status enum present/absent/late/excused, one per student+session) |
-| Exams | `question_bank` (type enum multiple_choice/true_false/short_answer/writing/listening/speaking), `exams`, `exam_questions` (join table, ordered), `exam_attempts` (retakes allowed), `answers` (one per attempt+question) |
+| Exams | `question_bank` (type enum multiple_choice/true_false/short_answer/writing/listening/speaking; `media_path`/`media_type` for an attached audio clip or image, added in Step 5 part 1), `exams`, `exam_questions` (join table, ordered), `exam_attempts` (retakes allowed), `answers` (one per attempt+question) |
 
 Design conventions used throughout — worth knowing before extending the
 schema later:
@@ -522,11 +523,25 @@ an RLS error attempting to upload to `exam-media`.
       override, totals). Zero student access anywhere yet - verified via
       UI redirects, direct RLS checks on the tables, and a direct RLS
       check on the exam-media bucket.
-- [ ] **Step 5 part 2** — Student-facing exam delivery: scoped student
-      RLS policies on `exams`/`exam_questions`/`exam_attempts`/`answers`
-      (never exposing `correct_answer`), taking an exam, and grading
-      (auto for multiple_choice/true_false/short_answer, manual for
-      writing/speaking).
+- [ ] **Step 5 part 2** — Students actually taking exams. NOT started -
+      everything below is still design work, not just missing UI:
+      - How a student gets access to an exam in the first place (an
+        assignment/scheduling model - e.g. is an exam attached to a
+        class the way assignments are, or does something else grant
+        access to a standalone certification exam?).
+      - New, careful RLS policies on `exams`/`exam_questions`/
+        `exam_attempts`/`answers` scoped to "a student's own attempt" -
+        `question_bank.correct_answer` must never be readable by a
+        student, including indirectly through an embedded/joined query.
+      - Delivering exam media (`exam-media` is staff-only right now -
+        needs scoped read access for a student mid-attempt, and only
+        for questions in that attempt).
+      - A timer against `duration_minutes` and what happens when it
+        expires.
+      - Grading: automatic for multiple_choice/true_false/short_answer
+        (compare against `correct_answer` server-side, never client-side),
+        manual teacher grading for writing/speaking.
+      - Showing the student their results afterward.
 - [ ] Later — build out attendance UI, grades/marks overview, admin panel.
 - [ ] Later — Vercel deployment.
 
