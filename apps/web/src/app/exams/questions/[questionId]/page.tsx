@@ -14,7 +14,9 @@ export default async function EditQuestionPage({
 
   const { data: question } = await supabase
     .from("question_bank")
-    .select("id, level, type, prompt, points, options, correct_answer, media_path, media_type")
+    .select(
+      "id, level, type, prompt, points, options, correct_answer, accepted_answers, media_path, media_type"
+    )
     .eq("id", questionId)
     .single();
 

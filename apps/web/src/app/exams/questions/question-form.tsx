@@ -20,6 +20,7 @@ export type ExistingQuestion = {
   points: number;
   options: string[] | null;
   correct_answer: string | null;
+  accepted_answers: string[] | null;
   media_path: string | null;
   media_type: string | null;
   mediaSignedUrl: string | null;
@@ -177,13 +178,21 @@ export function QuestionForm({ existing }: { existing?: ExistingQuestion }) {
 
       {type === "short_answer" && (
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="correctAnswerText">Correct answer</Label>
-          <Input
-            id="correctAnswerText"
-            name="correctAnswerText"
-            defaultValue={existing?.correct_answer ?? ""}
+          <Label htmlFor="acceptedAnswers">Accepted answers (one per line)</Label>
+          <Textarea
+            id="acceptedAnswers"
+            name="acceptedAnswers"
+            rows={3}
+            defaultValue={(
+              (existing?.type === "short_answer" ? existing.accepted_answers : null) ??
+              (existing?.correct_answer ? [existing.correct_answer] : [])
+            ).join("\n")}
             required
           />
+          <p className="text-xs text-muted-foreground">
+            Any of these count as correct. Matching ignores case, extra
+            spaces, and German umlaut spelling (ä/ae, ö/oe, ü/ue, ß/ss).
+          </p>
         </div>
       )}
 

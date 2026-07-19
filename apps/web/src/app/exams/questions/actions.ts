@@ -22,6 +22,7 @@ type ParsedQuestion = {
   points: number;
   options: string[] | null;
   correctAnswer: string | null;
+  acceptedAnswers: string[] | null;
 };
 
 function parseQuestionForm(formData: FormData): ParsedQuestion {
@@ -32,6 +33,7 @@ function parseQuestionForm(formData: FormData): ParsedQuestion {
 
   let options: string[] | null = null;
   let correctAnswer: string | null = null;
+  let acceptedAnswers: string[] | null = null;
 
   if (type === "multiple_choice") {
     const rawOptions = formData
@@ -46,18 +48,24 @@ function parseQuestionForm(formData: FormData): ParsedQuestion {
   } else if (type === "true_false") {
     correctAnswer = (formData.get("correctAnswerBoolean") as string) || null;
   } else if (type === "short_answer") {
-    correctAnswer = ((formData.get("correctAnswerText") as string) || "").trim() || null;
+    const rawAnswers = ((formData.get("acceptedAnswers") as string) || "")
+      .split("\n")
+      .map((a) => a.trim())
+      .filter(Boolean);
+    acceptedAnswers = rawAnswers.length > 0 ? rawAnswers : null;
+    correctAnswer = rawAnswers[0] ?? null;
   }
 
   // Belt and suspenders: writing/speaking (and anything unrecognized)
-  // never get an options/correct_answer value, regardless of what a
-  // tampered request might include.
+  // never get an options/correct_answer/accepted_answers value,
+  // regardless of what a tampered request might include.
   if (!isAutoGraded(type)) {
     options = null;
     correctAnswer = null;
+    acceptedAnswers = null;
   }
 
-  return { level, type, prompt, points, options, correctAnswer };
+  return { level, type, prompt, points, options, correctAnswer, acceptedAnswers };
 }
 
 function validateQuestion(q: ParsedQuestion): string | null {
@@ -70,8 +78,8 @@ function validateQuestion(q: ParsedQuestion): string | null {
   if (q.type === "true_false" && q.correctAnswer !== "true" && q.correctAnswer !== "false") {
     return "Select True or False.";
   }
-  if (q.type === "short_answer" && !q.correctAnswer) {
-    return "The correct answer is required for short answer questions.";
+  if (q.type === "short_answer" && (!q.acceptedAnswers || q.acceptedAnswers.length === 0)) {
+    return "At least one accepted answer is required for short answer questions.";
   }
   return null;
 }
@@ -114,6 +122,7 @@ export async function createQuestion(
       points: parsed.points,
       options: parsed.options,
       correct_answer: parsed.correctAnswer,
+      accepted_answers: parsed.acceptedAnswers,
       created_by: user.id,
     })
     .select("id")
@@ -196,6 +205,7 @@ export async function updateQuestion(
       points: parsed.points,
       options: parsed.options,
       correct_answer: parsed.correctAnswer,
+      accepted_answers: parsed.acceptedAnswers,
       media_path: mediaPath,
       media_type: mediaType,
     })

@@ -88,8 +88,8 @@ export default async function DashboardPage() {
           <CardTitle>{heading}</CardTitle>
           {profile?.role === "admin" && (
             <CardDescription>
-              A full admin panel is coming later - for now this just lists
-              every class, since admins can see everything.
+              This lists every class, since admins can see everything - manage
+              courses/classes/enrollments from the Admin card below.
             </CardDescription>
           )}
         </CardHeader>
@@ -122,9 +122,6 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle>Exams</CardTitle>
-            <CardDescription>
-              Staff-only for now - student exam-taking comes in a later step.
-            </CardDescription>
           </CardHeader>
           <CardContent className="flex gap-3">
             <Link
@@ -138,6 +135,44 @@ export default async function DashboardPage() {
               className="rounded-md border border-border px-3 py-2 text-sm hover:border-accent hover:text-accent"
             >
               Exams
+            </Link>
+            <Link
+              href="/exams/grading"
+              className="rounded-md border border-border px-3 py-2 text-sm hover:border-accent hover:text-accent"
+            >
+              Grading queue
+            </Link>
+          </CardContent>
+        </Card>
+      )}
+
+      {profile?.role === "admin" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Admin</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href="/admin"
+              className="rounded-md border border-border px-3 py-2 text-sm hover:border-accent hover:text-accent"
+            >
+              Courses, classes &amp; enrollments
+            </Link>
+          </CardContent>
+        </Card>
+      )}
+
+      {profile?.role === "student" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Exams</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href="/exams/my-exams"
+              className="rounded-md border border-border px-3 py-2 text-sm hover:border-accent hover:text-accent"
+            >
+              My exams
             </Link>
           </CardContent>
         </Card>

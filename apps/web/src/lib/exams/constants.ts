@@ -26,3 +26,18 @@ export const AUTO_GRADED_TYPES = new Set<QuestionType>([
 export function isAutoGraded(type: string): boolean {
   return AUTO_GRADED_TYPES.has(type as QuestionType);
 }
+
+// Normalizes text for auto-grading comparison: trims, lowercases, then
+// folds German umlauts/eszett to their unaccented ASCII spelling, so
+// "Straße", "strasse", and "STRASSE" all compare equal. Used for both
+// true_false ("true"/"false" already normalize trivially) and
+// short_answer (compared against every accepted_answers entry).
+export function normalizeAnswerText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replaceAll("ä", "ae")
+    .replaceAll("ö", "oe")
+    .replaceAll("ü", "ue")
+    .replaceAll("ß", "ss");
+}

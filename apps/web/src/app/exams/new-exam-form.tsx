@@ -65,6 +65,21 @@ export function NewExamForm({
         This is a certification exam
       </label>
 
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="passingScore">Passing score (optional)</Label>
+        <Input
+          id="passingScore"
+          name="passingScore"
+          type="number"
+          min={0}
+          step="0.5"
+          className="max-w-32"
+        />
+        <p className="text-xs text-muted-foreground">
+          Only used for pass/fail on certification exams - leave blank otherwise.
+        </p>
+      </div>
+
       {state.error && <p className="text-sm text-destructive">{state.error}</p>}
 
       <Button type="submit" disabled={pending} className="self-start">

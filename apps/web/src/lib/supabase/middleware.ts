@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PROTECTED_PATHS = ["/dashboard", "/classes", "/exams"];
+const PROTECTED_PATHS = ["/dashboard", "/classes", "/exams", "/admin"];
 
 /**
  * Runs on every matching request (see the matcher in src/middleware.ts).

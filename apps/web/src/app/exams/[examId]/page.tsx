@@ -113,6 +113,12 @@ export default async function ExamBuilderPage({
           {exam.classes?.name ?? "Standalone"} · {exam.duration_minutes} min ·{" "}
           {rows.length} question{rows.length === 1 ? "" : "s"} · {totalPoints} pts total
         </p>
+        <Link
+          href={`/exams/${examId}/assign`}
+          className="mt-2 inline-block text-sm text-accent hover:underline"
+        >
+          Assign this exam →
+        </Link>
       </div>
 
       <Card>

@@ -11,7 +11,7 @@ const SIGNED_URL_EXPIRY_SECONDS = 300; // 5 minutes
  * allowed to see the file.
  */
 export async function createSignedUrl(
-  bucket: "submissions" | "materials" | "exam-media",
+  bucket: "submissions" | "materials" | "exam-media" | "speaking-answers",
   path: string
 ): Promise<string | null> {
   const supabase = await createClient();

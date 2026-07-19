@@ -112,15 +112,16 @@ applied to the remote project. Row-Level Security is enabled on every
 table; real role-based policies were added in Step 3 part 2 — see
 "Access model (RLS)" below.
 
-Tables (15 total — 14 from the initial schema plus `assignment_materials`,
-added in Step 4 part 2):
+Tables (18 total — 14 from the initial schema, plus `assignment_materials`
+(Step 4 part 2), and `exam_assignments`/`exam_assignment_students`
+(Step 5 part 2)):
 
 | Group | Tables |
 |---|---|
 | People & courses | `profiles` (links to `auth.users`, role enum student/teacher/admin), `courses` (level enum A1–C1), `classes` (course + teacher + dates), `enrollments` (student ↔ class, unique per pair) |
 | Coursework | `assignments` (+ `assignment_materials` for teacher-attached files, Step 4 part 2), `submissions` (one per student+assignment; `file_path`/`file_name` for an attached file, renamed from `file_url` in Step 4 part 2), `grades` (one per submission) |
 | Attendance | `class_sessions`, `attendance` (status enum present/absent/late/excused, one per student+session) |
-| Exams | `question_bank` (type enum multiple_choice/true_false/short_answer/writing/listening/speaking; `media_path`/`media_type` for an attached audio clip or image, added in Step 5 part 1), `exams`, `exam_questions` (join table, ordered), `exam_attempts` (retakes allowed), `answers` (one per attempt+question) |
+| Exams | `question_bank` (type enum multiple_choice/true_false/short_answer/writing/listening/speaking; `media_path`/`media_type` for attached audio/image, Step 5 part 1; `accepted_answers` jsonb for multiple accepted short-answer variants, Step 5 part 2), `exams` (+ `passing_score`, Step 5 part 2), `exam_questions` (join table, ordered), `exam_assignments`/`exam_assignment_students` (who may take an exam and when, Step 5 part 2), `exam_attempts` (one per student+exam now — retakes were allowed pre-Step-5-part-2, no longer; + `is_late`/`auto_submitted` flags), `answers` (one per attempt+question; + `feedback`) |
 
 Design conventions used throughout — worth knowing before extending the
 schema later:
@@ -491,6 +492,432 @@ redirected away from every `/exams` route, gets zero rows back from
 `question_bank`/`exams` directly via the REST API, and is rejected with
 an RLS error attempting to upload to `exam-media`.
 
+## Exam taking (Step 5 part 2 — students, security-critical)
+
+Students can now actually sit an exam, but only one that's been
+explicitly **assigned** to them — never "by level", and never by simply
+being enrolled in a class. The whole design is organized around one hard
+rule: `question_bank.correct_answer` (and `accepted_answers`) must never
+reach the browser for a student, in any response, ever.
+
+### Assignment / scheduling model
+
+Two new tables, both introduced in
+[`20260717150000_add_exam_assignments_schema.sql`](supabase/migrations/20260717150000_add_exam_assignments_schema.sql):
+
+- `exam_assignments` — one row per "grant": `exam_id`, `assigned_by`,
+  `starts_at`/`ends_at` (both nullable), and `class_id` (nullable). A set
+  `class_id` means the class-quiz flow; `class_id is null` means the
+  admin/certification flow, targeting an explicit student list instead.
+- `exam_assignment_students` — the per-student *resolved* view: one row
+  per student who may take a given exam. Fanned out **at assignment
+  time**, not computed live — a deliberate point-in-time snapshot, the
+  same tradeoff the rest of the app already makes elsewhere. A student
+  enrolled in the class *after* the assignment was made won't
+  automatically see it.
+
+Two flows, both on `/exams/[examId]/assign`
+([`page.tsx`](apps/web/src/app/exams/[examId]/assign/page.tsx)):
+- **Quiz (teacher):** "Assign to class" — one button, no window
+  (`starts_at`/`ends_at` left null = takeable immediately). Fans out to
+  every student *currently* enrolled in that class. Gated to the class's
+  own teacher (or admin).
+- **Final/certification (admin-only):** pick specific students from a
+  checklist + an optional opening/closing window.
+
+One attempt per student per exam, enforced with a real
+`unique (exam_id, student_id)` constraint on `exam_attempts` — retakes
+were explicitly allowed pre-Step-5-part-2 (see the old schema comment);
+this step deliberately changes that.
+
+### Delivery: how correct_answer stays off the wire
+
+`question_bank` and `exam_questions` RLS is **completely untouched** —
+still the exact staff-only `for all` policies from Step 5 part 1. Students
+get **zero RLS grant on either table, ever.** That's what makes the "never
+reaches the browser" rule airtight *by construction*: Postgres RLS is
+row-level, not column-level, so there's no clean way to expose "prompt but
+not correct_answer" through a table policy alone.
+
+Instead, all student-facing question content is delivered through one
+place — [`apps/web/src/lib/exams/attempt-engine.ts`](apps/web/src/lib/exams/attempt-engine.ts)
+— using the **admin (service_role) client** (`lib/supabase/admin.ts`,
+previously unused in this codebase; this is its first real use case) to
+read `question_bank` bypassing RLS, then hand-building a response object
+that explicitly picks only `{id, type, prompt, points, options, mediaUrl,
+mediaType}` — `correct_answer`/`accepted_answers` are never selected by
+the query in the first place, so there's nothing to accidentally leak
+even if the sanitizing code had a bug. Every exported function in that
+file independently re-verifies the caller via `getUser()` and checks
+ownership/eligibility in code before doing anything — exactly the
+"tightly scoped to an already-verified user" case `admin.ts`'s own doc
+comment describes.
+
+`exam_attempts`/`answers` got one **additive, read-only** RLS policy each
+(own rows, `student_id = auth.uid()` / via attempt ownership) — added in
+[`20260717150100_add_exam_assignment_rls.sql`](supabase/migrations/20260717150100_add_exam_assignment_rls.sql)
+alongside a new `is_exam_assigned()` helper (same `SECURITY DEFINER`
+pattern as `is_admin`/`teaches_class`) backing an additive student SELECT
+policy on `exams`. **Deliberately no student INSERT/UPDATE policy
+anywhere** — starting an attempt, saving an answer, submitting, and
+grading all go through `attempt-engine.ts`'s admin-client functions,
+never a raw RLS grant. This closes off a student crafting a direct REST
+call to insert a fake attempt or backdate `started_at`.
+Exam-media for a question playing during an attempt is delivered the same
+way — a new `signed-url-admin.ts` mirrors the existing `signed-url.ts` but
+on the admin client, since the `exam-media` bucket's storage RLS is still
+100% staff-only.
+
+### Timer, progressive save, and "never discard, always flag"
+
+The exam's duration runs from the **server-recorded** `started_at`,
+independent of the assignment window and never trusting anything the
+client says about elapsed time. A late submission (or one the system had
+to finalize because nobody ever clicked submit) is **never discarded** —
+it's graded normally and just flagged:
+- `saveAnswer()` persists one answer at a time as the student works
+  (debounced ~1s per field in `<ExamTakingForm>`), so a closed tab never
+  loses more than the last few seconds of typing — there's no single
+  "submit everything at the end" cliff to fall off.
+- `finalizeAttempt()` (internal to `attempt-engine.ts`) grades whatever
+  was saved, sets `exam_attempts.is_late` if elapsed exceeds
+  `duration_minutes` + a 60s network-latency grace, and
+  `auto_submitted` if the system triggered this finalize rather than the
+  student's own submit click. **It's idempotent** — it no-ops immediately
+  unless `status === 'in_progress'`, so a client auto-submit timer and a
+  manual submit (or a resume-detection finalize racing an explicit
+  submit) can never double-finalize or double-count a score.
+- "Finalize on read": there's no real job scheduler in this stack, so
+  instead of a cron sweep, every place that could show a stale
+  `in_progress` attempt (resuming the take page, the "My exams" list, the
+  results page) checks first and finalizes it if the deadline has already
+  passed (`finalizeExpiredIfNeeded()`).
+
+  **This is a real limitation, not just a footnote: an attempt only
+  resolves once *someone* looks at it.** Fine for dev/demo. Wiring this to
+  a real scheduler (Vercel Cron or Supabase `pg_cron`, calling a bulk
+  finalize) is a **hard prerequisite before any real certification exam
+  runs for real stakes** — without it, an attempt nobody revisits can sit
+  `in_progress` indefinitely. Tracked as a "Later" item below; not
+  buildable/testable yet since this app isn't deployed anywhere.
+
+`exam_attempt_status` was recreated (safe — zero existing rows) as
+`in_progress → submitted → auto_graded → final`, with `expired` kept as a
+parallel enum value that **this app doesn't currently assign** — lateness
+is tracked entirely via the `is_late`/`auto_submitted` booleans instead,
+which turned out cleaner and more orthogonal than folding it into the
+status column. `submitted` is likewise currently unused (finalization is
+synchronous, so there's no observable gap between "submitted" and
+graded). Left in the enum rather than removed, same "intentionally unused
+value" precedent as `question_type.listening`.
+
+### Short-answer grading: multiple accepted answers, German-aware
+
+`question_bank.accepted_answers` (jsonb array, `short_answer` only) holds
+every accepted variant; `correct_answer` keeps the first one for
+backward-compatible display. The question-authoring form
+(`exams/questions/question-form.tsx`) uses a textarea, one accepted
+answer per line. Comparison (`normalizeAnswerText()` in
+`lib/exams/constants.ts`) trims, lowercases, then folds
+`ä→ae, ö→oe, ü→ue, ß→ss` on both the student's response and every
+accepted answer before comparing — so "Straße"/"strasse"/"STRASSE" all
+match.
+
+### Grading: auto + teacher override of *any* answer
+
+Objective types (`multiple_choice`/`true_false`/`short_answer`) are
+graded automatically in `finalizeAttempt()`. `writing`/`speaking` are left
+pending (`points_awarded: null`) for a teacher. **Speaking questions
+currently take a plain text response** (a text box, same as writing) —
+the standalone `<AudioRecorder>` component below exists but is
+deliberately not wired into the exam flow yet.
+
+The grading queue (`/exams/grading`, staff-only) lists attempts with
+something pending; the per-attempt page
+(`/exams/grading/[attemptId]`) shows **every answer in the attempt, not
+just the manual ones** — a teacher/admin can override the score of any
+answer, including auto-graded objective ones (e.g. correcting a
+mis-graded edge case), via `saveAnswerGrade()`. Any save recomputes
+`total_score` from scratch and re-derives status (`auto_graded` if
+anything's still unpointed, else `final`) — "finalizing the last pending
+answer finalizes the attempt" falls naturally out of that recompute
+rather than being special-cased. The per-attempt page stays reachable and
+editable even once `status = 'final'`, for later corrections; the queue
+*list* still only surfaces attempts with something pending, for triage.
+`is_correct` is deliberately left untouched by an override (only
+`points_awarded`/`feedback`/`graded_by` change) — once a teacher assigns
+points directly, "correct" stops being a clean yes/no.
+
+### Results and pass/fail
+
+`/exams/my-exams/[examId]/results` shows the student's own score
+(provisional while `auto_graded`, final once graded), `is_late`/
+`auto_submitted` flags, and — for certification exams with
+`exams.passing_score` set — a pass/fail badge. Per-question breakdown
+shows the prompt and the student's own answer/feedback, **never**
+`correct_answer`. Question content on this page is delivered by the same
+admin-client-mediated function as attempt-taking (`getAttemptBreakdown()`
+in `attempt-engine.ts`), not by a direct student query.
+
+### Timezones
+
+`datetime-local` inputs (the assign-to-students window) have no
+timezone of their own — converting them with `new Date(...).toISOString()`
+**inside a Server Action** would use the *server's* timezone, not the
+viewer's (the classic bug). Fixed by doing that conversion in the
+**browser**: `AssignToStudentsForm` is a Client Component that converts
+local→UTC into hidden fields on submit, so the Server Action only ever
+handles an already-correct ISO string. Symmetrically,
+[`components/local-date-time.tsx`](apps/web/src/components/local-date-time.tsx)
+renders a stored timestamptz back in the *viewer's* local time —
+formatting happens client-side only (via `useSyncExternalStore`, to stay
+hydration-safe without a setState-in-effect), since formatting during
+server rendering would use the server's timezone.
+
+### Standalone `<AudioRecorder>` + `speaking-answers` bucket (not wired in)
+
+[`components/audio-recorder.tsx`](apps/web/src/components/audio-recorder.tsx)
+is a reusable, self-contained component (`maxDurationSeconds`,
+`maxAttempts`, `allowReRecord` props; `onUploaded(path)` callback) built
+and verified on its own, ahead of a future part that will actually attach
+it to a speaking question's answer. Requires a mandatory mic-check
+(practice record→playback cycle, doesn't count toward `maxAttempts`)
+before the real recording unlocks; classifies `getUserMedia` failures
+into plain-language guidance (blocked / no device / unsupported) rather
+than a raw browser error; negotiates a supported `MediaRecorder` mimeType
+per-browser (Chrome and Safari support different sets).
+
+**The mic request only ever fires from a button's `onClick`, never from
+an effect on mount.** iOS Safari requires `getUserMedia` to be called
+synchronously within a user-gesture handler (a tap) - called any other
+way, no permission prompt appears and the promise can hang forever,
+neither resolving nor rejecting. This surfaced as a real bug during your
+own iPhone testing: the component auto-requested the mic on mount and
+just sat on "Checking microphone access…" indefinitely on iOS Safari.
+Fixed by starting the component in an `idle` phase (an explicit "Enable
+microphone" button) and only calling `getUserMedia` from that button's
+click handler. A `requestIdRef` counter guards against a late/stale
+`getUserMedia` resolution (from a superseded retry, or after unmount)
+clobbering more current state. A visible ~10s timeout
+(`MIC_REQUEST_TIMEOUT_MS`) also now covers the case where the call
+genuinely hangs anyway (a stuck permission dialog, a device/OS quirk) -
+past that, the "checking" state gives way to a "Try again" button rather
+than spinning forever. Every failure state (blocked/no-device/mic-error/
+timeout) now has a "Try again" button instead of requiring a full page
+reload to retry.
+
+The component also shows an always-visible debug panel (phase,
+`navigator.mediaDevices`/`MediaRecorder` presence, `isTypeSupported` per
+candidate mime type, and the raw `Name: message` of the last thrown
+error) since there's no way to see the browser console when testing on
+a phone. The `/dev/audio-recorder-test` page adds its own small banner
+above it showing `window.isSecureContext`/`window.location.origin` for
+the same reason - both use the `useSyncExternalStore` +
+`getServerSnapshot` pattern (see "Timezones" above) to stay
+hydration-safe.
+
+**A second, unrelated bug surfaced while chasing this on a real iPhone
+over a Cloudflare quick tunnel: the page loaded but was completely
+inert** - buttons didn't respond, `[HMR] connected` never logged, and
+the debug panel stayed frozen on server-rendered placeholder values
+forever. Root cause: Next.js's dev server rejects cross-origin requests
+by default (DNS-rebinding protection) - the initial HTML still renders
+fine, but the hydration/HMR requests get silently refused once the
+request's origin isn't `localhost`, so **React never hydrates at all**
+and the page is inert HTML dressed up as an app. Fixed in
+`next.config.ts` with `allowedDevOrigins: ["*.trycloudflare.com"]`
+(requires a dev server restart - this setting isn't hot-reloaded). Worth
+remembering for any future testing through a tunnel (ngrok, VS Code
+port forwarding, etc.) - add that host's pattern too, or nothing will be
+interactive despite the page loading with a `200`.
+
+With both bugs fixed, the full flow was confirmed on an actual iPhone
+(Safari): mic-check record→playback cycle, the real recording with
+auto-stop, upload, and playback of the uploaded copy from Storage - all
+working end to end.
+
+Uploads to a new private `speaking-answers` bucket
+(`{student_id}/{filename}` path convention, policies in
+[`20260717140000_add_speaking_answers_bucket_policies.sql`](supabase/migrations/20260717140000_add_speaking_answers_bucket_policies.sql)):
+own-folder read/write for the student, plus admin read for oversight.
+**Deliberately no teacher read policy yet** — "the relevant teacher" only
+means something once a recording is linked to a specific exam
+attempt/class, which doesn't exist until it's actually wired in; granting
+every teacher blanket access to every student's recordings now would be
+over-broad and hard to walk back. A scratch verification page lives at
+`/dev/audio-recorder-test` — safe to delete once a real feature mounts
+the component.
+
+### A recursion bug found and fixed during verification
+
+The first live test of "assign to class" failed with
+`infinite recursion detected in policy for relation "exam_assignments"`.
+Cause: `exam_assignments_select` did a raw correlated subquery directly
+against `exam_assignment_students`, and `exam_assignment_students`'s own
+policies did the same back against `exam_assignments` — each table's RLS
+re-triggers the other's, forever. This is exactly the trap
+`is_admin()`/`teaches_class()`/`is_enrolled()` were built as
+`SECURITY DEFINER` functions to avoid (see "Access model (RLS)" above) —
+the new cross-table checks just weren't wrapped the same way. Fixed in
+[`20260717150200_fix_exam_assignment_rls_recursion.sql`](supabase/migrations/20260717150200_fix_exam_assignment_rls_recursion.sql)
+with two new helper functions, `assignment_grants_student()` and
+`is_assignment_staff()`, each bypassing RLS on the table it queries so
+evaluating one table's policy no longer re-enters the other's.
+
+### Verified
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean. Full disposable-account walkthrough (1 teacher, 2 students, 1
+admin, temporary course/class/enrollment/questions/exams — all deleted
+afterward): teacher assigned a quiz exam to their class (fanned out to
+exactly the one enrolled student, correctly excluding the unenrolled
+one); admin assigned a certification exam to a specific student with a
+future opening time, and the entered local time round-tripped through
+storage and back to the same displayed local time exactly. Student took
+the quiz exam: options/media delivered with no `correct_answer` anywhere
+in the rendered HTML (checked directly, not just visually); an answer
+survived a full page reload mid-attempt (progressive save); short-answer
+grading matched "STRASSE" against the stored "Straße" via the German-
+normalization fold; auto-grading was correct for multiple choice/true-
+false/short-answer, writing left pending; attempt landed in
+`auto_graded` (provisional) with the right total. Teacher's grading
+queue showed the pending attempt; overriding an already-auto-graded
+objective answer's points recomputed `total_score` correctly; grading
+the last pending (writing) answer flipped the attempt to `final`.
+Results page showed the final score and both feedback comments.
+Simulated a never-submitted expired attempt (rewound `started_at` on a
+real in-progress attempt past `duration_minutes` + grace) and confirmed
+resume-detection finalized it on next read with `is_late`/
+`auto_submitted` both `true` and a correct `Not passed` badge against
+`passing_score`. Confirmed directly via the REST API: a student gets
+zero rows from `question_bank`/`exam_questions`, a student's direct
+`exam_attempts` insert is rejected by RLS, an unassigned student sees
+zero rows for an exam, and an assigned student sees exactly one.
+
+AudioRecorder was checked as far as a browser without a real microphone
+allows (compiles, logs in, correctly shows the "microphone blocked"
+guidance path) — real recording/upload plus iOS Safari behavior still
+needs a manual pass on an actual device, tracked separately.
+
+## Admin panel (Step 6 part 2 — courses, classes, enrollments)
+
+The first real `/admin`-only section. Full CRUD on `courses` and
+`classes`, plus per-class student roster management. Deliberately does
+**not** include attendance UI or a grades/marks overview — those are
+separate, still-open steps.
+
+### Access
+
+[`lib/supabase/require-admin.ts`](apps/web/src/lib/supabase/require-admin.ts)
+— same shape as `require-staff.ts`, but stricter: redirects anyone who
+isn't `role === "admin"` (teachers included) to `/dashboard`. `/admin` was
+added to `PROTECTED_PATHS` in `lib/supabase/middleware.ts` so signed-out
+visitors get redirected at the middleware layer too.
+
+**Worth knowing:** this feature needed **zero new migrations** —
+`courses` (insert/update/delete are `is_admin()`-only) and `classes`
+(insert/delete `is_admin()`-only, update also allows the class's own
+teacher) already fully supported it. One correction to keep in mind
+though: `enrollments` writes are **not** strictly admin-only at the RLS
+layer — `enrollments_insert/update/delete` are all
+`is_admin() or teaches_class(class_id)`, so a teacher already has full
+read/write access to their own class's roster via the API, they just
+have no UI for it yet. The real boundary for this admin surface is the
+page-level `requireAdmin()` gate, not a tighter RLS policy.
+
+### Reusable confirmation dialog
+
+First real modal this app has needed — every delete anywhere else is
+instant, one-click, no confirmation.
+[`components/ui/dialog.tsx`](apps/web/src/components/ui/dialog.tsx) is a
+themed Radix `Dialog` (via the installed `radix-ui` package, same as
+`Checkbox`), using the already-installed `tw-animate-css` for the open/
+close transition.
+[`components/confirm-dialog.tsx`](apps/web/src/components/confirm-dialog.tsx)
+is the reusable higher-level piece — **any future destructive action
+anywhere in this app should reuse `<ConfirmDialog>` rather than inventing
+another pattern.** Two modes:
+- **Routine** — just a title/description and a destructive Confirm
+  button (e.g. deleting an empty course).
+- **High-risk** (pass `requireTypedConfirmation`) — the Confirm button
+  stays disabled until the user types the exact course/class name. Used
+  whenever a delete would cascade into real child data, with the
+  description spelling out precisely what's affected (exact counts, not
+  vague "this may affect other data" language) - blocking would also have
+  been acceptable, but requiring the exact name typed plus an honest
+  impact breakdown was the chosen tradeoff over forcing an admin to
+  manually empty a course/class first.
+
+### Courses (`/admin/courses`)
+
+Full CRUD via a shared `CourseForm` (create/edit dual-use, same pattern
+as `question-form.tsx`): title, level (reuses the existing
+`COURSE_LEVELS` constant), optional description. Deleting a course whose
+`classCount > 0` uses the high-risk dialog — description shows the exact
+class count and total enrolled-student count across those classes
+(`classes.course_id` is `on delete cascade`, so deleting a course
+cascades through its classes to their enrollments/assignments/sessions
+and further to submissions/grades/attendance; any exams tied to those
+classes are **not** deleted, `exams.class_id` is `on delete set null` so
+they survive as standalone exams).
+
+### Classes (`/admin/classes`)
+
+Full CRUD via a shared `ClassForm`: name, course picker, teacher picker
+(new query — `profiles` filtered to `role = 'teacher'`, mirroring the
+existing `role = 'student'` picker query from the exam-assignment
+screen), start/end dates. Reassigning a class's teacher is just an
+`updateClass` call, same as any other field. Deleting a class uses the
+high-risk dialog whenever it still has enrollments, assignments, or exams
+attached — the description is precise about which of those are deleted
+(enrollments, assignments) versus merely detached (exams become
+standalone, per the FK rule above).
+
+### Enrollments (`/admin/classes/[classId]`)
+
+Combined with the class edit form on one page. Current roster is a plain
+list with an instant one-click **Remove** (routine, same convention as
+removing an exam question or a material - not a cascade risk, no dialog
+needed). Adding a student uses a client-side-filterable list
+(`student-picker.tsx`) of students **not already enrolled** — the list
+itself is how duplicate enrollment is prevented (an enrolled student
+can't appear in the "available" list to begin with); the DB's
+`unique (class_id, student_id)` constraint is only the backstop for a
+race, surfaced as a friendly "already enrolled" message rather than a raw
+Postgres error if it's ever hit.
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean. Full
+disposable-account walkthrough (1 admin, 2 teachers, 1 student,
+temporary course/class/enrollment data — all deleted afterward): a
+teacher account is redirected away from `/admin`, `/admin/courses`, and
+`/admin/classes`. As admin: created/edited/deleted a course, confirmed
+the routine dialog on an empty course and the high-risk dialog (accurate
+class/student counts, Delete disabled until the exact title is typed) on
+one with a class attached; created/edited a class including reassigning
+its teacher, confirmed the roster add/remove flow (search filter,
+already-enrolled students excluded from the add list) and the high-risk
+class-delete dialog's breakdown.
+
+Also verified **at the Server Action level, not just the page redirect**
+— signed in as a teacher and called `createCourse`/`updateCourse`/
+`deleteCourse`, `deleteClass`, and `updateClass` (on a class they don't
+teach) directly. All five are correctly rejected. One methodology
+correction worth recording here, alongside the existing note in "Access
+model (RLS)" above: an *initial* pass at this check used only `.update()`/
+`.delete()` with no `.select()`, and read a missing `error` as "this
+succeeded" — which is exactly backwards for RLS-blocked writes, since
+Postgres returns no error and just zero affected rows. That false
+positive briefly looked like a real courses/classes RLS gap; redoing the
+check with `.select()` after the write (so the actual affected rows are
+visible) confirmed the original policies were correct all along.
+[`20260717160000_fix_courses_classes_rls_drift.sql`](supabase/migrations/20260717160000_fix_courses_classes_rls_drift.sql)
+is a no-op left in place as an honest record of this. The `assertAdmin()`
+code-level check on every `/admin` mutation was kept regardless, as
+deliberate defense-in-depth alongside RLS rather than a fix for a real
+hole.
+
 ## Progress / plan
 
 - [x] **Step 1** — Verified Node/pnpm/git installed, scaffolded the Turborepo
@@ -523,26 +950,40 @@ an RLS error attempting to upload to `exam-media`.
       override, totals). Zero student access anywhere yet - verified via
       UI redirects, direct RLS checks on the tables, and a direct RLS
       check on the exam-media bucket.
-- [ ] **Step 5 part 2** — Students actually taking exams. NOT started -
-      everything below is still design work, not just missing UI:
-      - How a student gets access to an exam in the first place (an
-        assignment/scheduling model - e.g. is an exam attached to a
-        class the way assignments are, or does something else grant
-        access to a standalone certification exam?).
-      - New, careful RLS policies on `exams`/`exam_questions`/
-        `exam_attempts`/`answers` scoped to "a student's own attempt" -
-        `question_bank.correct_answer` must never be readable by a
-        student, including indirectly through an embedded/joined query.
-      - Delivering exam media (`exam-media` is staff-only right now -
-        needs scoped read access for a student mid-attempt, and only
-        for questions in that attempt).
-      - A timer against `duration_minutes` and what happens when it
-        expires.
-      - Grading: automatic for multiple_choice/true_false/short_answer
-        (compare against `correct_answer` server-side, never client-side),
-        manual teacher grading for writing/speaking.
-      - Showing the student their results afterward.
-- [ ] Later — build out attendance UI, grades/marks overview, admin panel.
+- [x] **Step 5 part 2** — Students taking exams, plus a standalone
+      `<AudioRecorder>` (see "Exam taking" above for the full design):
+      assignment/scheduling model, admin-client-mediated delivery so
+      `correct_answer` never reaches the browser, progressive save +
+      finalize-on-read, mixed auto/override grading, results + pass/fail,
+      multi-accepted-answer short-answer grading, timezone-correct
+      scheduling. Code complete, typechecked, linted, and a full
+      production build passes clean. Migrations applied (four in total —
+      a fourth fixed an RLS recursion bug the first live test caught, see
+      "A recursion bug found and fixed during verification" above), the
+      `speaking-answers` bucket created, and a full disposable-account
+      walkthrough passed end-to-end (assign → take → grade → results,
+      RLS/security checks, a simulated expired attempt). Real-device
+      testing for the AudioRecorder (iOS Safari, actual microphone) is
+      also done — see the "not wired in" section above for what that
+      surfaced and fixed (a `getUserMedia`-on-mount bug, and a Next.js
+      dev-server cross-origin hydration bug that only showed up when
+      testing through a tunnel).
+- [ ] Later — wire `<AudioRecorder>` into the exam flow as an actual
+      speaking-question answer (parts 2/3 of the Step 5 part 2 speaking
+      work) - the component and its bucket exist but aren't connected to
+      anything yet.
+- [ ] Later — wire the exam finalize-on-read sweep to a real scheduler
+      (Vercel Cron or Supabase `pg_cron`). **Hard prerequisite before any
+      real certification exam runs** - without it, an attempt nobody
+      revisits can sit `in_progress` indefinitely.
+- [x] **Step 6 part 2** — Admin panel: full CRUD on courses and classes,
+      plus per-class enrollment/roster management, all under `/admin`
+      (see "Admin panel" above). First reusable confirmation dialog in
+      the app (`<ConfirmDialog>`) - future destructive actions should
+      reuse it. Zero new migrations needed (existing RLS already
+      supported it). Attendance UI and a grades/marks overview
+      deliberately not built yet - separate, still-open steps.
+- [ ] Later — build out attendance UI and a grades/marks overview.
 - [ ] Later — Vercel deployment.
 
 Brand theme (logo, palette, shadcn setup) was done as an unnumbered

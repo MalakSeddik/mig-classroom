@@ -103,3 +103,13 @@ export function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// Speaking-answer recordings from <AudioRecorder> (MediaRecorder output),
+// not arbitrary user-picked files - so this is a looser check than
+// isAllowedFile()/isAllowedExamMediaFile() above (just size + a generic
+// "audio/*" type check) rather than a strict mime/extension allowlist.
+export const MAX_RECORDING_SIZE_BYTES = 15 * 1024 * 1024; // 15MB
+
+export function isAllowedRecording(file: { type: string; size: number }): boolean {
+  return file.size > 0 && file.size <= MAX_RECORDING_SIZE_BYTES && file.type.startsWith("audio/");
+}
