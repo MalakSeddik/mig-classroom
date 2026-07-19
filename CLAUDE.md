@@ -716,6 +716,14 @@ the same reason - both use the `useSyncExternalStore` +
 `getServerSnapshot` pattern (see "Timezones" above) to stay
 hydration-safe.
 
+**Requires a secure context (HTTPS, or `localhost`) - noted for launch.**
+`getUserMedia`/`MediaRecorder` are hidden entirely by the browser outside
+a secure context; a plain `http://<lan-ip>` URL doesn't qualify, which is
+exactly what the `isSecureContext` banner above is for catching. Not a
+concern once this app is actually deployed (Vercel serves HTTPS by
+default), but worth remembering for any future local-network or
+tunnel-based device testing before then.
+
 **A second, unrelated bug surfaced while chasing this on a real iPhone
 over a Cloudflare quick tunnel: the page loaded but was completely
 inert** - buttons didn't respond, `[HMR] connected` never logged, and
@@ -968,10 +976,14 @@ hole.
       surfaced and fixed (a `getUserMedia`-on-mount bug, and a Next.js
       dev-server cross-origin hydration bug that only showed up when
       testing through a tunnel).
-- [ ] Later — wire `<AudioRecorder>` into the exam flow as an actual
-      speaking-question answer (parts 2/3 of the Step 5 part 2 speaking
-      work) - the component and its bucket exist but aren't connected to
-      anything yet.
+- [ ] Later (next) — wire `<AudioRecorder>` into the exam flow as an
+      actual speaking-question answer (parts 2/3 of the Step 5 part 2
+      speaking work) - the component and its bucket exist but aren't
+      connected to anything yet.
+- [ ] Later — wire `<AudioRecorder>` into assignments too, as a speaking-
+      practice submission option alongside the existing text/file
+      submission - a separate integration point from the exam one above,
+      not yet scoped in detail.
 - [ ] Later — wire the exam finalize-on-read sweep to a real scheduler
       (Vercel Cron or Supabase `pg_cron`). **Hard prerequisite before any
       real certification exam runs** - without it, an attempt nobody
