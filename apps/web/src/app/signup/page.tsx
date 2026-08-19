@@ -6,6 +6,7 @@ import { signup, type SignupState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandedBackground } from "@/components/branded-background";
 import {
   Card,
   CardHeader,
@@ -20,11 +21,12 @@ export default function SignupPage() {
   const [state, formAction, pending] = useActionState(signup, initialState);
 
   return (
-    <div className="flex flex-1 items-center justify-center px-4 py-12">
+    <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-background px-4 py-12">
+      <BrandedBackground />
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Create your account</CardTitle>
-          <CardDescription>Join MIG Classroom as a student.</CardDescription>
+          <CardDescription>Join MIG Classroom - an admin will review your request.</CardDescription>
         </CardHeader>
         <CardContent>
           <form action={formAction} className="flex flex-col gap-4">
@@ -53,6 +55,30 @@ export default function SignupPage() {
                 required
               />
             </div>
+
+            <fieldset className="flex flex-col gap-1.5">
+              <legend className="text-sm font-medium">I am registering as</legend>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="requestedRole"
+                    value="student"
+                    defaultChecked
+                    className="accent-primary"
+                  />
+                  Student
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" name="requestedRole" value="teacher" className="accent-primary" />
+                  Teacher
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                This is a request, not a grant - an admin reviews and approves every new account before
+                it can access anything.
+              </p>
+            </fieldset>
 
             {state.error && (
               <p className="text-sm text-destructive">{state.error}</p>

@@ -118,8 +118,8 @@ Tables (18 total — 14 from the initial schema, plus `assignment_materials`
 
 | Group | Tables |
 |---|---|
-| People & courses | `profiles` (links to `auth.users`, role enum student/teacher/admin), `courses` (level enum A1–C1), `classes` (course + teacher + dates), `enrollments` (student ↔ class, unique per pair) |
-| Coursework | `assignments` (+ `assignment_materials` for teacher-attached files, Step 4 part 2), `submissions` (one per student+assignment; `file_path`/`file_name` for an attached file, renamed from `file_url` in Step 4 part 2), `grades` (one per submission) |
+| People & courses | `profiles` (links to `auth.users`, role enum student/teacher/admin; `status` enum pending/approved/rejected and `requested_role`, Step 7 part 3), `courses` (level enum A1–C1), `classes` (course + teacher + dates), `enrollments` (student ↔ class, unique per pair) |
+| Coursework | `assignments` (+ `assignment_materials` for teacher-attached files, Step 4 part 2; `requires_audio` flag for a required spoken answer, speaking-into-assignments follow-up), `submissions` (one per student+assignment; `file_path`/`file_name` for an attached file, renamed from `file_url` in Step 4 part 2; `audio_path` for a recorded spoken answer, speaking-into-assignments follow-up), `grades` (one per submission) |
 | Attendance | `class_sessions`, `attendance` (status enum present/absent/late/excused, one per student+session) |
 | Exams | `question_bank` (type enum multiple_choice/true_false/short_answer/writing/listening/speaking; `media_path`/`media_type` for attached audio/image, Step 5 part 1; `accepted_answers` jsonb for multiple accepted short-answer variants, Step 5 part 2), `exams` (+ `passing_score`, Step 5 part 2), `exam_questions` (join table, ordered), `exam_assignments`/`exam_assignment_students` (who may take an exam and when, Step 5 part 2), `exam_attempts` (one per student+exam now — retakes were allowed pre-Step-5-part-2, no longer; + `is_late`/`auto_submitted` flags), `answers` (one per attempt+question; + `feedback`) |
 
@@ -164,12 +164,21 @@ sessions).
 - Auth checks use `supabase.auth.getUser()`, not `getSession()` —
   `getUser()` revalidates the token against Supabase's Auth server rather
   than just trusting whatever's in the cookie.
-- Email confirmation **is required** on this Supabase project
-  (`mailer_autoconfirm: false`) — after signup, `signUp()` returns no
-  session until the user clicks the confirmation link in their email.
-  The signup action handles both cases: redirects straight to
-  `/dashboard` if a session comes back immediately, otherwise shows
-  "check your email".
+- Email confirmation is **temporarily disabled** (`mailer_autoconfirm: true`,
+  set via the Supabase Management API) — this was originally required
+  (`mailer_autoconfirm: false`) but got in the way of testing: this
+  project's custom SMTP provider is Resend, and Resend's account is still
+  in test mode, which refuses to send to any address except the account
+  owner's own verified one. That 500 from Resend was the actual root
+  cause of a signup bug that looked like a network/certificate issue for
+  a while (see the debugging history if this resurfaces) — it wasn't
+  network, DNS, TLS, or the trigger; a raw fetch to Supabase succeeded
+  fine in the same process where `signUp()` failed. The signup action's
+  code doesn't change based on this setting either way — it already
+  handles both cases (redirects straight to `/dashboard` if a session
+  comes back immediately, i.e. confirmation disabled; shows "check your
+  email" if not). **Must be re-enabled before go-live** — see Step 8 in
+  the Progress section below.
 
 ### Default-to-student rule (security-critical)
 
@@ -215,6 +224,12 @@ All four are `SECURITY DEFINER`, so their internal queries bypass RLS.
 That's required, not just convenient: a policy on `profiles` that calls a
 function which queries `profiles` would otherwise re-trigger the same
 policy it's in the middle of evaluating (infinite recursion).
+
+**Since Step 7 part 3, all four also require `status = 'approved'`** (via
+a fifth helper, `is_approved()`) — see "Self-registration & admin
+approval" below for the full design. This is what makes a pending or
+rejected user's RLS lockout automatic across the entire schema, without
+editing every individual policy.
 
 ### Per-table summary
 
@@ -409,6 +424,110 @@ saved to the database correctly but the UI wouldn't show it." Fixed by
 typing these as a single nullable object. Worth checking the actual
 shape of a nested select's response rather than assuming, especially
 across a unique FK.
+
+### Speaking wired into assignments (practice mode)
+
+`<AudioRecorder>` and the `speaking-answers` bucket are now used a
+*second* place, alongside exam speaking questions: a teacher can mark an
+assignment as needing a spoken answer, and the student records it
+directly into their submission. Deliberately **practice mode, not
+invigilated** — the opposite tradeoffs from the exam flow:
+`allowReRecord = true`, a generous `ASSIGNMENT_AUDIO_MAX_DURATION_SECONDS
+= 300` (5 min) and `ASSIGNMENT_AUDIO_MAX_ATTEMPTS = 10` per recorder
+mount (both in the new
+[`lib/recordings/constants.ts`](apps/web/src/lib/recordings/constants.ts),
+kept separate from the exam-specific caps in `lib/exams/constants.ts`
+since the two flows now intentionally diverge), and `skipMicTest` is
+**not** passed — there's no start-screen gate for an assignment the way
+there is for an exam, so the recorder's own built-in mic-check step is
+the only mic check that happens here, and stays on.
+
+**Schema**: `assignments.requires_audio boolean default false` (teacher-
+settable) and `submissions.audio_path text` (nullable, independent of
+`content`/`file_path` — a submission can carry text, a file, audio, or
+any combination) — both added in
+[`20260717180000_add_assignment_audio.sql`](supabase/migrations/20260717180000_add_assignment_audio.sql).
+**This migration has not been applied to the remote project yet** —
+same manual Dashboard SQL Editor workflow as every other migration in
+this repo.
+
+**No edit-assignment form exists in this app yet** — assignments have
+only ever been create-only (`<NewAssignmentForm>` on the class page; see
+"Classroom features" above). `requires_audio` is a checkbox on that
+create form, so it can currently only be set when an assignment is first
+made, not toggled afterward. Building a real edit-assignment feature was
+out of scope for this task and wasn't attempted — flagging it here rather
+than silently working around it.
+
+**Recording now, attaching later — same two-step shape the exam flow
+already established.** `<AudioRecorder>`'s `onUploaded` fires the moment
+a take is durably in Storage, well before the surrounding submission
+form is ever submitted. `<SubmitForm>` holds the resulting path in local
+state (`audioPath`) and includes it as a hidden field, so it's only
+linked to the `submissions` row when the student actually clicks Submit —
+consistent with how the text and file fields already work, and how
+`saveAnswer()` already decoupled "uploaded" from "attached to an answer"
+for exam speaking questions.
+
+**Genuinely unlimited re-recording, not just a big `maxAttempts`.** Once
+a take is uploaded, `<SubmitForm>` swaps the recorder for a
+`<SpeakingRecordingPlayback>` (the same shared component the exam flow
+uses — extracted from `<ExamTakingForm>`'s local `SpeakingAnswerPlayback`
+into
+[`components/speaking-recording-playback.tsx`](apps/web/src/components/speaking-recording-playback.tsx)
+now that it's used in two places) plus a "Record a new answer" button.
+That button clears `audioPath` and bumps a `key` on the next
+`<AudioRecorder>` mount, which resets the component's internal
+`attemptsUsed`/phase state from scratch — so `maxAttempts` only bounds a
+single take-and-review cycle, not the student's overall ability to keep
+trying. Replacing an already-submitted recording deletes the old Storage
+object in `submitAssignment()` (same "remove the old object before
+saving the new path" pattern already used for `file_path`), under the
+student's own `speaking_answers_own_delete` policy — no admin client
+needed.
+
+**`requires_audio` is enforced server-side, not just nudged in the UI.**
+`submitAssignment()` looks up `assignments.requires_audio` itself rather
+than trusting the hidden form field for whether a recording is mandatory
+— the field only ever carries *which* recording to attach. If the
+assignment requires one and none is attached, the submit is rejected
+with a plain-language error, same as the existing "write an answer or
+attach a file" check.
+
+**The teacher grading view reuses the exact same widened RLS policy as
+exam grading**, not a new one. `teaches_speaking_answer()` (the
+`SECURITY DEFINER` helper backing `speaking_answers_teacher_select`,
+added for exam grading in
+[`20260717170000_add_speaking_answers_teacher_policy.sql`](supabase/migrations/20260717170000_add_speaking_answers_teacher_policy.sql))
+is `create or replace`d in the new migration to also check
+`submissions.audio_path` joined through `assignments.class_id` —
+actually a simpler one-hop join than the exam case, since `assignments`
+has its own `class_id` directly, no `exam_assignment_students` indirection
+needed. Same guarantee holds: only the class's own teacher, or an admin,
+can hear the recording — a teacher of a different class gets `null` back
+from `createSignedUrl` and the grading page shows "Recording unavailable"
+instead of erroring, handled by a small local `SpeakingSubmissionAudio`
+server component (same pattern as the exam grading page's
+`SpeakingAnswerAudio`, kept as light duplication rather than a shared
+component — each page's version is a ~10-line async function scoped to
+its own page, consistent with how `QuestionMedia`/`FileAttachment`-style
+helpers are already written per-page elsewhere in this app).
+
+**Gentle prompt, not a hard gate.** The assignment page shows an "Audio
+required" badge next to the due date/points (visible to everyone, so the
+flag stays visible after creation despite there being no edit form yet),
+and the submission form shows the requested prompt text directly above
+the recorder: "This assignment needs a spoken answer... have your mic
+ready and run the quick mic check below - you can re-record as many
+times as you like before submitting."
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean. **Not yet done:** the migration above hasn't been applied to the
+remote project, and there's been no disposable-account walkthrough or
+real-microphone testing yet (same sandbox-has-no-microphone limitation
+noted throughout the exam speaking work above).
 
 ## Exam authoring (Step 5 part 1 — staff only, no student access yet)
 
@@ -752,9 +871,11 @@ own-folder read/write for the student, plus admin read for oversight.
 means something once a recording is linked to a specific exam
 attempt/class, which doesn't exist until it's actually wired in; granting
 every teacher blanket access to every student's recordings now would be
-over-broad and hard to walk back. A scratch verification page lives at
+over-broad and hard to walk back. A scratch verification page lived at
 `/dev/audio-recorder-test` — safe to delete once a real feature mounts
-the component.
+the component. (It later did, twice over - see "Pre-launch route
+cleanup" near the end of this file for when the page was actually
+removed.)
 
 ### A recursion bug found and fixed during verification
 
@@ -806,6 +927,154 @@ AudioRecorder was checked as far as a browser without a real microphone
 allows (compiles, logs in, correctly shows the "microphone blocked"
 guidance path) — real recording/upload plus iOS Safari behavior still
 needs a manual pass on an actual device, tracked separately.
+
+### Speaking questions wired into exams (invigilated mode)
+
+The standalone `<AudioRecorder>` and `speaking-answers` bucket from above
+are now actually used by a speaking question during a real exam attempt,
+instead of the plain textarea placeholder that stood in for it before.
+**Invigilated, not practice mode**: `SPEAKING_ANSWER_MAX_ATTEMPTS = 1`,
+`allowReRecord = false` — one take, no do-overs, matching a real spoken
+exam rather than rehearsal. `question_bank` has no per-question recording-
+length column, so the cap (`SPEAKING_ANSWER_MAX_DURATION_SECONDS = 120`)
+is a fixed constant in
+[`lib/exams/constants.ts`](apps/web/src/lib/exams/constants.ts) rather
+than something set per question — worth adding a real column later if a
+teacher ever needs a different cap per question.
+
+**Saved through the exact same progressive-save path as every other
+answer type**: `<AudioRecorder>`'s `onUploaded` callback (fires once the
+clip is durably in the `speaking-answers` bucket) hands the returned
+storage path straight to `saveAnswer()` — the same function
+`handleAnswerChange` already used for text answers — so `answers.response`
+holds a storage path string for a speaking question, not typed text. No
+new column, no new save path. Because it's a real `saveAnswer()` call, a
+recorded-but-never-submitted clip is already durably linked to the
+attempt if the student closes the tab, same as any other progressively-
+saved answer — and because `speaking` was never in `AUTO_GRADED_TYPES`,
+`finalizeAttempt()` already treated it as pending-manual with zero
+changes needed there.
+
+**The mic-check gate runs before the clock starts, not during the exam.**
+`startOrResumeAttempt()` creates the `exam_attempts` row (and thus starts
+`started_at`) as a side effect of its very first call — so gating on a
+mic check *inside* that function would burn exam time on the mic check
+itself. Fixed by splitting eligibility-checking out of attempt-creation:
+a new `getExamStartInfo()` in
+[`attempt-engine.ts`](apps/web/src/lib/exams/attempt-engine.ts) runs the
+same assignment/window checks (shared via a `resolveEligibility()`
+helper) but never inserts an attempt row, and additionally reports
+whether the exam contains a speaking question. The take-exam page calls
+this first; if there's no existing attempt yet, it renders
+[`<ExamStartScreen>`](apps/web/src/components/exam-start-screen.tsx) — a
+warning ("the timer keeps running while you record", the exact attempt
+count) plus, only if the exam has a speaking question, a mic-check gate
+before "Start exam" unlocks. Only on that click does
+`startOrResumeAttempt()` run and the clock actually start. If an attempt
+is already `in_progress` (resuming after a reload), the gate is skipped
+entirely — the clock's already running either way, so there's nothing
+left to protect by gating.
+
+The mic-check gate reuses `<AudioRecorder>` itself rather than a second
+component: a new optional `onMicCheckPassed` prop fires right when the
+"Sounds good, I'm ready" button is clicked (i.e. the built-in mic-check
+clip was recorded and played back), and the parent immediately unmounts
+the recorder in favor of a "Mic check passed" badge — so the gate never
+exposes the real "Start recording" action, it only ever proves the mic
+works. This is an additive prop on the existing, already-verified
+component; nothing about its tested recording behavior changed.
+
+**The exam's own answer recorder skips its internal mic-test step, since
+the start screen already ran one.** Without this, a student would pass
+the mic check on `<ExamStartScreen>`, then hit the speaking question and
+be forced through the exact same record-a-test-clip-and-play-it-back
+step again — redundant, and it burns exam time since the clock is
+running by then. Fixed with a new `skipMicTest` prop on `<AudioRecorder>`:
+when true, once `getUserMedia` succeeds the component jumps straight from
+requesting mic permission to the "ready to record" phase, bypassing
+`test-idle`/`test-recording`/`test-recorded` entirely. `<ExamTakingForm>`
+passes `skipMicTest` on the recorder it mounts for the actual question;
+`<ExamStartScreen>`'s own recorder (the gate itself) does not, since for
+that one the mic test *is* the point. Defaults to `false` everywhere else
+- the future assignments speaking submission has no equivalent start-
+screen gate, so it should keep the full mic-test step.
+
+**The always-visible debug panel (phase, `getUserMedia`/`MediaRecorder`
+presence, mime support, last error) is no longer shown by default** - it
+was built for troubleshooting real-device mic issues with no console
+access (see the original `<AudioRecorder>` work above), and was never
+meant for a student to see mid-exam. Gated behind a new `showDebugPanel`
+prop, default `false`; only `/dev/audio-recorder-test` (the scratch
+verification page, not reachable from anywhere in the real app) opted
+in. Kept rather than deleted outright at the time, since real-device
+testing without console access is exactly the kind of thing this app will
+need again for the still-open assignments-speaking and iOS-retest work.
+
+**Resuming a question that already has a saved recording shows playback,
+never a second `<AudioRecorder>`** — `allowReRecord = false` means once
+`answers[question.id]` is set there's no legitimate way to record again,
+so `<ExamTakingForm>` renders a small `<SpeakingAnswerPlayback>` (fetches
+its own signed URL via the existing `getRecordingPlaybackUrl()`, which
+already worked for the student's own recording under the pre-existing
+owner-only storage policy — no new access path needed there).
+
+**Grading and results playback, not raw storage paths.** A speaking
+answer's `response` is a bucket path, not readable text, so showing it as
+plain text (like a writing answer) would be meaningless. Two read paths,
+deliberately different:
+- The **grading queue** (`/exams/grading/[attemptId]`) plays it via the
+  regular signed-in client's `createSignedUrl("speaking-answers", ...)` —
+  gated by the real new RLS policy below, not an admin-client bypass,
+  since "which teacher can hear which student's recording" is exactly
+  the kind of per-caller check RLS already handles for every other
+  bucket in this app.
+- The **student's own results page** gets `answerAudioUrl` from
+  `getAttemptBreakdown()`, via `createSignedUrlAdmin()` (now extended to
+  also accept the `speaking-answers` bucket) — reusing the same
+  "already-verified caller" trust boundary `getAttemptBreakdown()` already
+  established for its own `student_id === caller` check, the same pattern
+  question media already uses in that function.
+
+**The deferred teacher read policy is now in place**, scoped narrowly —
+migration
+[`20260717170000_add_speaking_answers_teacher_policy.sql`](supabase/migrations/20260717170000_add_speaking_answers_teacher_policy.sql).
+A speaking-answers object's path is `{student_id}/{filename}` with no
+class segment to read directly (unlike `submissions`/`materials`), so a
+new `teaches_speaking_answer(object_name)` `SECURITY DEFINER` helper
+walks `answers → exam_attempts → exam_assignment_students →
+exam_assignments → classes.teacher_id` instead — wrapped as a definer
+function for the same recursion-avoidance reason as every other cross-
+table RLS check in this app (see `teaches_class`/`is_enrolled` and the
+exam-assignments recursion fix above). Only covers the class-quiz
+assignment flow (`exam_assignments.class_id is not null`); an
+admin/certification assignment (`class_id` null, an explicit student
+list) grants no teacher access, since there is no "the class" for those —
+admins can already read every recording via the pre-existing
+`speaking_answers_select` policy. **Still never all teachers** — a
+teacher who doesn't teach the assigning class gets `null` back from
+`createSignedUrl` and the grading page shows "Recording unavailable"
+instead of erroring.
+
+**This migration has not been applied to the remote project yet** —
+following this repo's established workflow (the Supabase CLI project
+isn't linked; schema/policy changes get pasted into the Dashboard's SQL
+Editor by hand), it needs to be applied there before a teacher can
+actually hear a recording outside of admin access.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean, including after the `skipMicTest`/`showDebugPanel` follow-up fixes
+above. Confirmed in the browser that an unauthenticated visit to
+`/exams/my-exams/[examId]` still cleanly redirects to `/login` with no
+console errors, so the new `getExamStartInfo()` path doesn't break the
+existing auth gate. **Not yet done:** the migration above hasn't been
+applied to the remote project; a full disposable-account walkthrough
+(assign → mic-check gate → record once, not twice → grade → results
+playback, and confirming the debug panel stays hidden throughout) and
+real-device microphone testing (this sandbox has no microphone, same
+limitation noted for the original `<AudioRecorder>` work above) are both
+still outstanding.
 
 ## Admin panel (Step 6 part 2 — courses, classes, enrollments)
 
@@ -926,6 +1195,783 @@ code-level check on every `/admin` mutation was kept regardless, as
 deliberate defense-in-depth alongside RLS rather than a fix for a real
 hole.
 
+## Attendance UI (Step 7 part 1)
+
+The first UI on top of `class_sessions`/`attendance` — both tables and
+their RLS have existed since the initial schema (Step 2) but had no
+screens until now. **Zero new migrations** - this step is pure UI over
+already-correct access control (`class_sessions_*`/`attendance_*` in
+[`20260717015807_add_rls_policies.sql`](supabase/migrations/20260717015807_add_rls_policies.sql)),
+the same "the schema was already ready, the app just wasn't" situation
+Step 6 part 2 hit with courses/classes.
+
+### Routes
+
+- `/classes/[classId]/attendance` — role-aware, same `isStaffView`
+  pattern as the class page itself (`classes.teacher_id === user.id ||
+  role === 'admin'`), not a hard `requireStaff()`/`requireAdmin()` gate,
+  since students need their own view of this same route:
+  - **Staff** (teacher of the class, or any admin): the session list
+    (date, optional topic, a "N recorded" / "Not recorded yet" badge)
+    plus a "New session" form (`session_date`, optional `topic` -
+    `class_sessions_insert`'s RLS, admin or `teaches_class`, is the only
+    gate; no extra role check in `createSession()`, same convention as
+    `createAssignment()`). Each session links to its roster editor.
+  - **Student**: their own attendance only - `attendance_select`'s RLS
+    (`student_id = auth.uid()`) makes this airtight regardless of what
+    the UI does, but the query also filters explicitly to their own id
+    for the same belt-and-suspenders clarity `StudentSubmission` uses
+    elsewhere. Shows one row per session (status badge, or "Not recorded
+    yet" if the teacher hasn't taken attendance for that date) plus a
+    "Present X/Y" summary, where Y counts only sessions with an actual
+    recorded status - a session that happened but hasn't been taken yet
+    shouldn't count against the student.
+- `/classes/[classId]/attendance/[sessionId]` — the roster editor,
+  **staff-only with no student-facing view** (unlike the class/assignment
+  pages, which serve both roles): a non-staff visitor who reaches this
+  URL is redirected back to the parent attendance page, same "no RLS
+  permission to submit this form" reasoning as the assignment submission
+  grading page's redirect. Lists every enrolled student (from
+  `enrollments`, same join-with-`profiles(full_name)` pattern the admin
+  roster page uses) with a `<NativeSelect>` defaulted to their **existing**
+  recorded status, or **`present`** if this student has no attendance row
+  yet for this session - satisfies "default everyone to present, teacher
+  adjusts" without needing a seed step. A summary badge above the list
+  (e.g. "18 present, 2 absent") is computed from that same default-aware
+  state, so a freshly-created session correctly shows everyone counted as
+  present before a single save.
+
+### Saving attendance: one upsert, insert and edit both fall out of it
+
+`saveAttendance()` in
+[`attendance/actions.ts`](apps/web/src/app/classes/[classId]/attendance/actions.ts)
+re-fetches the class roster from `enrollments` itself rather than trusting
+which `status-{studentId}` fields the submitted form happens to contain -
+a missing or tampered field can't silently skip a student or attribute a
+status to someone not actually enrolled. It then upserts one row per
+roster student with `onConflict: "session_id,student_id"`
+(`attendance_session_student_unique` is exactly that constraint) - the
+same "insert or update, whichever applies" shape already used for
+grades and exam-answer overrides elsewhere in this app. That single
+upsert is also what makes **editing a past session's attendance** work
+with zero special-casing: reopening an old session's roster page shows
+its previously-saved statuses (not the present-default) as the select
+defaults, and saving again just updates those same rows in place.
+
+### A plain `date` column needs its own formatting helper
+
+`class_sessions.session_date` is a Postgres `date`, not a `timestamptz`
+like everywhere else timestamps show up in this app (`due_date`,
+`created_at`, etc.) - it has no time-of-day or timezone component at all,
+just a calendar date. Formatting it the way `due_date` already is
+(`new Date(dateString).toLocaleDateString()`) would be a real bug here: a
+bare `"2026-07-19"` string parses as UTC midnight, so a viewer west of
+UTC (most of the Americas) would see it roll back a day. Added
+`formatDateOnly()` to
+[`lib/utils.ts`](apps/web/src/lib/utils.ts), which parses the
+`YYYY-MM-DD` parts and builds a *local* `Date` (`new Date(year, month -
+1, day)`) instead of parsing the string directly - there's no timezone
+conversion left to go wrong for a value that was never a moment in time
+to begin with. Caught before shipping, not after - worth remembering
+for any future `date`-typed column (none exist elsewhere in this schema
+today).
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean. Confirmed in the browser that an unauthenticated visit to
+`/classes/[classId]/attendance` cleanly redirects to `/login` with no
+console errors. **Not yet done:** no disposable-account walkthrough yet
+(create a session, record a mixed roster, confirm the student-side view
+shows only their own record and the right summary, confirm a
+non-class teacher is denied, edit a past session and confirm it updates
+in place rather than duplicating).
+
+## Grades / marks overview (Step 7 part 2)
+
+Zero new migrations again - like attendance, this reads data that
+already exists (`grades`, `exam_attempts`, `enrollments`) through RLS
+that already exists. The only genuinely new code is one small addition
+to `attempt-engine.ts` (see below); everything else is UI.
+
+### Routes
+
+- [`/grades`](apps/web/src/app/grades/page.tsx) — student's own overview,
+  added to `PROTECTED_PATHS` in
+  [`lib/supabase/middleware.ts`](apps/web/src/lib/supabase/middleware.ts)
+  alongside `/classes`/`/exams`/`/admin`. Pulls together `submissions`
+  (join `assignments`, `grades`) and exam attempts, grouped by class name
+  (a certification/standalone exam with no `class_id` falls into a
+  "Certification / Standalone" bucket at the end of the list). Reachable
+  from the dashboard's existing "Exams" card (a new "My grades" link next
+  to "My exams") and from a "My grades" button on each class page.
+- [`/classes/[classId]/grades`](apps/web/src/app/classes/[classId]/grades/page.tsx)
+  — teacher/admin gradebook for one class, same `isStaffView` pattern as
+  attendance (`classes.teacher_id === user.id || role === 'admin'`); a
+  student who reaches this URL is redirected back to the class page,
+  same reasoning as the attendance session editor. Reachable via a new
+  "Grades" button next to "Attendance" on the class page.
+
+### Three types, one existing column
+
+The task asked for assignment/quiz/exam as three distinct types. There's
+no separate "quiz" table - it's the same `exams` row shape as a
+certification exam, distinguished only by the existing
+`exams.is_certification` boolean (already set via the "certification
+checkbox" on the exam creation form from Step 5 part 1). So
+`is_certification ? "Exam" : "Quiz"` was enough - no schema change
+needed.
+
+### "This class's exams" reuses the grading queue's existing convention
+
+An exam's real *class* isn't unambiguous in this schema: `exams.class_id`
+is set once at creation time (an organizational tag), while
+`exam_assignments.class_id` is what actually determines who can take it
+(Step 5 part 2's quiz-assignment flow). The existing grading queue
+(`/exams/grading`) already had to make this call and picked
+`exams.class_id` to scope "this teacher's exams" - both new grades pages
+follow that same precedent rather than inventing a different scoping
+rule, so an exam only shows up in a class's gradebook if it was tagged
+with that class at creation time.
+
+### Never inventing a zero - the same honesty rule on both sides
+
+Both pages compute their point summaries the same way: sum `score` and
+`maxScore` only across items that actually **have** a recorded score
+(a `grades` row, or a `total_score` on a `final`/`auto_graded` exam
+attempt). Anything ungraded or unsubmitted is left out of both the
+numerator and the denominator entirely, rather than folded in as a zero -
+a student one assignment behind isn't shown as failing that assignment,
+just as not-yet-counted. The student page shows a "N pending" count
+alongside the fraction so it's clear the number isn't the whole picture;
+the teacher page lists exactly which items are pending, with a link
+straight to the grading screen for each.
+
+### A provisional exam score is still a real number, unlike a truly pending assignment
+
+A `final` exam attempt or a graded assignment both contribute a clean,
+finished number. An `auto_graded` exam attempt is different - its
+objective questions (multiple choice, true/false, short answer) already
+have a real score, only a writing/speaking answer is still waiting on a
+teacher, and `finalizeAttempt()` already computes `total_score` across
+whatever's graded so far (see "Grading: auto + teacher override of *any*
+answer" above). Both grades pages treat that as a real number that
+counts toward the running total (labeled "Provisional" on the student
+side), while still surfacing the attempt as needing teacher action - it's
+not "ungraded" in the same sense a never-touched submission is, but it's
+not finished either.
+
+### `getMyExamSummaries()` — new, but narrowly scoped like every other function in this file
+
+Assignments have a flat `max_points` column; exams don't - an exam's max
+possible score is the sum of `exam_questions.points_override ??
+question_bank.points`. Staff can already read `exam_questions`/
+`question_bank` directly (the existing staff-only `for all` RLS policy),
+so the teacher gradebook just queries them with the regular signed-in
+client. A student has **zero** RLS grant on either table, by design (see
+"Delivery: how correct_answer stays off the wire" above) - so
+`/grades` needed a new admin-client-mediated function, added to
+[`attempt-engine.ts`](apps/web/src/lib/exams/attempt-engine.ts) following
+the exact same shape as every other function in that file:
+independently re-verify the caller via `getUser()`, then only ever query
+exam_ids drawn from *that caller's own* attempts. Deliberately leaner
+than reusing `getAttemptBreakdown()` for this - it never selects
+`prompt`/`options`/`media_path`, just the `points` column, and never
+generates the signed media URLs a full breakdown would (those aren't
+needed for a total). Nothing about the answer-hiding design changes -
+this is a new, narrow, ownership-checked window onto one number
+(possible points), not a new way to read exam content.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean. Confirmed in the browser that an unauthenticated visit to
+`/grades` cleanly redirects to `/login` with no console errors.
+**Not yet done:** no disposable-account walkthrough yet (a student
+with a mix of graded/pending/provisional work seeing the right numbers
+and only their own; a teacher's gradebook showing the right per-student
+totals and ungraded links; a non-class teacher and a student both denied
+`/classes/[classId]/grades`).
+
+## Self-registration & admin approval (Step 7 part 3)
+
+New model: every profile now has an approval `status` -
+`pending`/`approved`/`rejected`, default `pending`. A signed-up-but-not-
+approved user can still log in, but is blocked from every real table in
+the schema by RLS itself - the UI (a status screen) is a courtesy
+redirect on top of that, not the actual lock.
+
+### Status model: `status` vs `requested_role` vs `role`
+
+Three separate concepts, easy to conflate:
+- **`role`** (`student`/`teacher`/`admin`) — the real, privilege-bearing
+  value every existing policy already checks. Still hardcoded to
+  `'student'` by the signup trigger, exactly as before Step 7 part 3 -
+  this migration changes nothing about how `role` itself is protected.
+- **`requested_role`** (`student`/`teacher`, nullable, `text` with a
+  check constraint rather than a new enum) — what the user asked for at
+  signup. Purely informational: it's stored so the admin approval screen
+  can default its role selector sensibly, and nothing else ever reads it.
+  It **never grants anything by itself** - a user could even tamper with
+  their own `requested_role` after signup (it isn't trigger-protected,
+  unlike `role`/`status`) and it would still do nothing, since no policy
+  or check anywhere conditions access on it.
+- **`status`** (`pending`/`approved`/`rejected`, a real enum
+  `profile_status`) — the actual gate. `pending` and `rejected` both mean
+  "blocked from real data"; the UI happens to word them differently on
+  the status screen, but RLS treats them identically.
+
+### Migration safety: backfilling existing accounts
+
+[`20260717190000_add_registration_approval.sql`](supabase/migrations/20260717190000_add_registration_approval.sql)
+adds `status` as `not null default 'pending'` - which means every
+*existing* profile (including whichever account is the current admin)
+would get backfilled to `'pending'` the instant the column is added,
+and then immediately fail every `is_admin()`/`is_teacher()` check the
+moment this same migration finishes, since those functions start
+requiring `status = 'approved'` a few statements later. The migration
+handles this explicitly with `update public.profiles set status =
+'approved';` right after adding the column and before touching any
+helper function - every account that existed before this feature shipped
+is treated as already-approved (correct: they were already using the app
+normally under the old, gate-less model). Only genuinely new signups
+after this migration ever start out `'pending'`. **This ordering matters
+- don't reorder the migration's statements when applying it.**
+
+### RLS: baking `is_approved()` into the four foundational helpers, not rewriting every policy
+
+The naive approach - add `and status = 'approved'` to every single
+policy across every table - would mean touching a couple dozen policies
+across six-plus migration files, with high odds of missing one. Instead,
+`is_approved()` (a fifth `SECURITY DEFINER` helper, same shape as
+`is_admin()`) gets baked directly into `is_admin()`, `is_teacher()`,
+`teaches_class()`, and `is_enrolled()` - the four helpers essentially
+every other policy in this schema is already built from (see "Access
+model (RLS)" above). That single change makes the lockout an emergent
+property of the existing architecture: courses, classes, enrollments,
+assignments, class_sessions, assignment_materials, the staff-only exam
+tables, and the submissions/materials/exam-media storage buckets all
+inherit it automatically, with zero edits to their own policy
+definitions. `is_exam_assigned()` and `assignment_grants_student()` (the
+two exam-assignment-specific helpers from Step 5 part 2) got the same
+treatment, since they don't route through the main four.
+
+**What doesn't route through any helper still needed an explicit,
+individual fix.** A handful of policies check `some_id = auth.uid()`
+directly rather than calling a helper - these are all "a user reads
+their *own* row by direct id match" patterns, and none of them
+automatically inherited the new gate:
+- `profiles_select`'s teacher-views-enrolled-student branch (a raw join,
+  not routed through `teaches_class()`) - the `id = auth.uid()` branch
+  right next to it was deliberately left alone, since a pending/rejected
+  user must still be able to read their *own* profile to see their own
+  status.
+- `submissions_select`, `grades_select`, `attendance_select`,
+  `exam_attempts_student_select`, `answers_student_select`,
+  `exam_assignment_students_select` - each has a `student_id =
+  auth.uid()` (or equivalent) branch for a student reading their own
+  work, independent of whether they're still enrolled in the relevant
+  class.
+- `exam_assignments_select`'s `assigned_by = auth.uid()` branch (a
+  teacher/admin viewing an assignment they personally created).
+- The `speaking-answers` storage bucket's own-folder insert/update/
+  delete/select policies - a raw `(storage.foldername(name))[1] =
+  auth.uid()::text` path check with no helper involved at all.
+- The `submissions` bucket's delete policy (the only one of that
+  bucket's four policies with no `WITH CHECK` at all to fall back on -
+  insert/update both already required `is_enrolled()` inside their
+  `WITH CHECK`, so they were already safe once `is_enrolled()` got
+  gated) and the own-folder branch of its select policy.
+
+The scenario this protects against: a student who *was* approved, has
+real data (submissions, grades, attendance, exam attempts, recordings),
+and is *later* rejected. Without these individual fixes, they'd keep
+seeing their own historical data through these specific branches even
+though every class/assignment-scoped view was already correctly locked
+out via the four main helpers.
+
+### Self-approval was a real, closeable gap
+
+`profiles_update_own` lets any signed-in user update their *own* row for
+any column not otherwise protected - that's how a user is meant to be
+able to edit things like their own `full_name` someday. Without a
+trigger-level check, a pending user could have called the REST API
+directly and set their own `status` to `'approved'` - the RLS policy
+would have allowed the *row*, since it's their own; only a column-level
+check stops that specific value. This exact problem already existed for
+`role` (see `protect_profile_role_trigger` in "Access model (RLS)"
+above), so `status` got the identical treatment in the same trigger
+function rather than a new one: `protect_profile_role()` now blocks
+`new.status is distinct from old.status` the same way it already blocked
+`new.role is distinct from old.role`, with the same
+`auth.uid() is null` bootstrap exception (needed for the same reason -
+service_role/direct-SQL contexts have no real signed-in user behind
+them). An approving admin's own `is_admin()` check passes both branches
+in the same call, since granting access always updates `role` and
+`status` together in one `UPDATE`.
+
+### Routes
+
+- `/signup` — added a required "I am registering as: Student / Teacher"
+  radio group, sent as `requested_role` in the signup metadata (alongside
+  the existing `full_name`). `handle_new_user()` validates it against an
+  allowlist of exactly `student`/`teacher` server-side (falling back to
+  `student` for anything else) before storing it - not because a bad
+  value is a security risk (`requested_role` grants nothing), just data
+  hygiene. `role` itself is still hardcoded `'student'` in the same
+  trigger, completely independent of what was requested.
+- [`/pending`](apps/web/src/app/pending/page.tsx) — the status screen.
+  Shows a different message for `pending` vs `rejected` (same page,
+  since the RLS treatment is identical either way), reads its own status
+  the same way the dashboard reads its own profile, and redirects an
+  already-approved visitor straight to `/dashboard` (a stale bookmark
+  shouldn't show a stale screen). Includes the same `<LogoutButton>`
+  every other authenticated page uses - a pending user needs a way out.
+- [`/admin/registrations`](apps/web/src/app/admin/registrations/page.tsx)
+  — lists every `status = 'pending'` profile (name, requested role,
+  signup date) plus their email, looked up via the admin (service_role)
+  client's Auth API (`profiles` has no email column - that lives on
+  `auth.users`, which PostgREST never exposes directly). Each row has an
+  Approve form (a role `<NativeSelect>` defaulting to `requested_role`,
+  submitting both `status = 'approved'` and the chosen `role` in one
+  `UPDATE`) and a one-click Reject form (`status = 'rejected'`, same
+  instant-no-confirmation convention as removing a material or an exam
+  question). The admin hub page shows a gold count badge next to the
+  link whenever there's at least one pending request, so new signups
+  don't go unnoticed.
+
+**The role selector deliberately never offers "admin".** Only
+`student`/`teacher` are accepted - server-side, `approveRegistration()`
+rejects anything else before it ever reaches the database. Granting
+admin has been a deliberately higher-friction, SQL-only action since the
+bootstrap fix in Step 3 part 2 (see "Access model (RLS)" above); wiring
+it into a one-click dropdown here would be a real change to that trust
+model, not something this task asked for.
+
+**There is no general "change any user's role/status" admin tool** -
+only this specific pending-queue approve/reject flow. A "last-admin
+guard" (preventing the last remaining admin from being demoted) doesn't
+exist anywhere in this codebase, and this feature doesn't need one: the
+approval flow only ever touches brand-new pending registrants, and can
+never modify an existing admin's role or status. Worth building
+*before* any future feature that lets an admin edit an arbitrary user's
+role, but out of scope here.
+
+### Middleware: a friendlier redirect on top of the real RLS lock
+
+[`lib/supabase/middleware.ts`](apps/web/src/lib/supabase/middleware.ts)
+now does one extra check for every request to a `PROTECTED_PATH` (now
+including `/pending` itself, so the redirect can bail out once the user
+is already there rather than looping): if the signed-in user's own
+`status` isn't `'approved'`, redirect to `/pending`. This is explicitly
+**not** the security boundary - it's there so a pending/rejected user
+sees one clear status screen instead of a wall of pages that all
+silently return empty data. Even a request that somehow bypassed this
+redirect entirely would still get nothing back from the database, since
+that's enforced by RLS via `is_approved()`. One real cost worth knowing
+about: this adds one extra indexed-by-primary-key `profiles` lookup to
+every protected-page request, not just the ones that end up redirecting.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean. Confirmed in the browser (no real account available) that
+unauthenticated visits to `/pending` and `/admin/registrations` cleanly
+redirect to `/login`, and that `/signup`'s new "I am registering as"
+fields render correctly, all with no console errors. **This is the
+least-verified feature in the app so far** - the migration has not been
+applied to the remote project, and because it's a schema/RLS change
+(not just new UI over existing access control, unlike Steps 7 part 1/2),
+none of the actual gating behavior has been exercised yet: no
+disposable-account walkthrough of signup → pending screen → admin
+approval → real access unlocking; no direct-REST-API confirmation that a
+pending user's requests to real tables come back empty; no confirmation
+that the existing admin/teacher/student accounts survive the migration's
+backfill and keep working exactly as before. **Given this touches auth
+and RLS for every existing table, review the migration closely and test
+it against a disposable account before relying on it.**
+
+## Shell & role-based dashboards (Step 7 part 4)
+
+A first design pass tying the app together: a persistent nav shell around
+every real page, and `/dashboard` rebuilt as two actual overview screens
+(student and teacher) instead of one generic card list. Explicitly a
+**first version for review** - reuses existing data/routes throughout,
+no new tables or migrations.
+
+### The `(app)` route group
+
+Every authenticated area - `dashboard`, `classes`, `exams`, `admin`,
+`grades` - moved into `apps/web/src/app/(app)/`, a Next.js route group.
+Parenthesized folder names don't appear in the URL, so `/dashboard` is
+still `/dashboard`; this only changes where the *file* lives, letting
+[`(app)/layout.tsx`](apps/web/src/app/(app)/layout.tsx) wrap all of them
+in the shell from one place instead of every page repeating nav
+boilerplate. `/login`, `/signup`, `/pending`, and the marketing `/` page
+deliberately stay outside the group - `/pending` especially, since a
+non-approved user shouldn't see nav to areas they can't reach yet.
+
+The layout re-checks auth and approval status itself (redirecting to
+`/login` or `/pending`) even though middleware already does this first -
+same defense-in-depth reasoning as every other page-level check in this
+app. It fetches the signed-in profile via the new
+[`getCurrentProfile()`](apps/web/src/lib/supabase/current-user.ts),
+wrapped in React's `cache()` so pages under the layout that also need the
+profile (like `/dashboard` itself) don't cause a duplicate query for the
+same request - `cache()` dedupes calls to the same function within one
+render pass.
+
+**One real gotcha hit during the move**: Windows held file locks on the
+old route folders while a dev server was running, so `classes`/`exams`/
+`admin` failed to move until the dev server was stopped first. Only one
+file needed an import fix afterward - `logout-button.tsx` imported
+`logout` via the absolute path `@/app/dashboard/actions`, which now
+resolves to `@/app/(app)/dashboard/actions` since the file physically
+moved (parentheses are legal in a path alias, this isn't special syntax).
+Every other cross-file reference in this app already used relative
+imports or route *strings* (`href`, `revalidatePath`), which don't care
+where a file physically lives.
+
+### The shell itself
+
+[`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx) - a
+persistent left sidebar on desktop (`md:flex`, hidden below that
+breakpoint), collapsing to a slim top bar + a slide-over drawer on mobile
+(built on the same Radix `Dialog` primitive `<ConfirmDialog>` already
+uses elsewhere, just repositioned to the left edge instead of centered).
+Nav items are role-derived (`getNavItems()`), and deliberately only link
+to routes that actually exist today - deeper per-class navigation
+(a class's own assignments/attendance/grades) stays reachable the way it
+already was, via each class page's own buttons, not duplicated at the
+top level. Admins get their own set (Admin home, Registrations with a
+live pending-count badge, Courses, Classes) plus the same
+exam/grading-queue links teachers get, since admins already have staff
+access to those pages.
+
+**The MIG logo sits in a literal `bg-white` chip, not a theme token.**
+The logo PNG has a light background baked into the image itself (see
+"Brand theme" above - it "needs a light surface behind it, not a dark
+header") and that's a property of the fixed external asset, not a
+themed UI choice, so it's a deliberate, commented exception to
+"no hardcoded colors." Everything else in the shell uses theme
+variables.
+
+**Why the sidebar isn't literally MIG Black.** The first instinct was a
+dark "MIG Black" sidebar with the logo in its own contrasting chip,
+matching how a lot of corporate dashboards separate a dark nav rail from
+a light content area. Reversed once the logo constraint above was
+factored in properly: the sidebar now mirrors `--background` in
+whichever theme is active (light sidebar in light mode, dark sidebar in
+dark mode) with MIG Red reserved for the active-item highlight - simpler,
+avoids the sidebar ever fighting the logo for contrast, and still reads
+as "calm, professional, red as accent" per the brief. `--sidebar-*` and
+`--sidebar-primary` (the active-item color) are real theme tokens now,
+not shadcn's unused defaults - see the dark-mode section below.
+
+### Dark mode, actually themed
+
+Dark mode has existed since the very first brand-theme pass but was
+always shadcn's stock achromatic gray - never re-themed, as CLAUDE.md's
+own "Brand theme" section already flagged. With a visible theme toggle
+now in the shell, that gap would actually be seen, so
+[`globals.css`](apps/web/src/app/globals.css)'s `.dark` block is properly
+re-themed: the same warm-neutral undertone light mode uses (not pure
+gray), `--primary` inverted to light-on-dark (MIG Black as a button
+background is invisible on an already-dark page), and `--accent`/
+`--destructive` brightened several steps for legibility against a dark
+background - same brand hues, adjusted lightness/chroma, not different
+colors. Verified directly (not just by eyeballing it): loaded the app
+with the OS color scheme forced to dark, and confirmed via
+`getComputedStyle` that `<html>` picks up the `dark` class and
+`body`'s background/text colors resolve to the new dark values, then did
+the same check in light mode.
+
+### Theme toggle
+
+Added `next-themes` (`ThemeProvider` wraps the whole app in the root
+layout, `attribute="class"` + `defaultTheme="system"`). The toggle button
+itself
+([`components/theme-toggle.tsx`](apps/web/src/components/theme-toggle.tsx))
+uses `useSyncExternalStore` to know whether it's mounted yet, rather than
+the more common `useEffect(() => setMounted(true), [])` pattern - this
+codebase already has that exact "avoid a hydration mismatch for a
+client-only value" problem solved this way elsewhere (`AudioRecorder`'s
+capability detection, `LocalDateTime`), and it also sidesteps this
+project's stricter lint setup, which now flags `setState` calls made
+directly inside an effect body (`react-hooks/set-state-in-effect`) - the
+same rule that reshaped the mobile drawer below.
+
+### Two real dashboards, not one generic one
+
+`/dashboard` is now a thin role dispatcher: admins redirect straight to
+`/admin` (their real home, reachable from the shell's nav either way),
+teachers and students get genuinely different components -
+[`student-dashboard.tsx`](apps/web/src/app/(app)/dashboard/student-dashboard.tsx)
+and
+[`teacher-dashboard.tsx`](apps/web/src/app/(app)/dashboard/teacher-dashboard.tsx).
+
+- **Student**: Upcoming (assignments not yet submitted + exams that are
+  open or opening soon, merged and sorted so "open now" beats "opens
+  later"), My classes, and Recent grades & feedback (last few
+  submissions plus the last few exam results, ungraded work shown as a
+  "Pending" badge rather than folded in as a zero - same honesty rule
+  `/grades` already established in Step 7 part 2).
+- **Teacher**: Needs grading (ungraded submissions + `auto_graded` exam
+  attempts across their classes, combined into one actionable list with
+  direct links into the existing grading screens - reuses the exact same
+  `exams.class_id` scoping convention the grading queue and class
+  gradebook already settled on), My classes (with live student/assignment
+  counts, computed the same "group rows in JS" way the attendance page
+  already does rather than trusting an unverified PostgREST aggregate
+  embed shape), and Exams & assignments (recent items across their
+  classes).
+
+Both dashboards call existing, already-verified data paths rather than
+new ones - `getMyExamSummaries()` from Step 7 part 2 for the student's
+exam max-points (still the only student-facing window onto
+`exam_questions`/`question_bank`, still never touching
+`correct_answer`), and the same RLS-scoped `classes`/`assignments`/
+`exam_attempts` queries every other page already relies on.
+
+### A lint rule that doesn't fit Server Components
+
+`student-dashboard.tsx` calls `Date.now()` once per render to compute
+"is this due date in the future" - the newer `react-hooks/purity` rule
+(part of this project's React Compiler-aware ESLint config) flagged that
+as an impure call, since the rule assumes a component might be
+re-rendered/memoized multiple times with the same props. That assumption
+doesn't hold for an async Server Component, which runs exactly once per
+request - disabled with a one-line justification rather than restructured
+around a rule that's aimed at a different rendering model.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build (`next build`) all pass
+clean - including after clearing a stale `.next` type-cache directory
+that briefly showed unrelated-looking errors right after the route-group
+move (auto-generated route types from before the move, not a real
+problem). Confirmed in the browser: an unauthenticated visit to
+`/dashboard` still redirects cleanly to `/login` (proving the middleware
+matcher, which matches on URL path, is unaffected by the physical route
+group move), and dark/light mode both apply the correct theme class and
+resolve to the correct computed background/text colors. **Not yet done -
+this is explicitly a first pass for review**: no disposable-account
+walkthrough of the actual dashboards yet (a student with a realistic mix
+of upcoming/graded/pending work, a teacher with ungrading across
+multiple classes, the mobile drawer on a real small viewport), and no
+visual review from the project owner yet, which is the whole point of
+stopping here.
+
+## Pre-launch route cleanup
+
+A follow-up pass after the Step 7 part 4 shell review: a real landing
+page, one dead route removed, two pages that were technically open to
+the wrong role now redirect properly, and the per-role nav lists were
+finalized. No new migrations, no schema changes - all app-layer.
+
+### `/` is a real landing page now
+
+It was still the very first scaffold from the original brand-theme
+detour - a static "Theme preview" page with a fake header (`href="#"`
+links that went nowhere) and hardcoded demo content, never actually
+wired to auth or replaced. It's now the public front door:
+[`app/page.tsx`](apps/web/src/app/page.tsx) checks
+`getCurrentProfile()` and redirects a signed-in visitor straight to
+`/dashboard` (which itself redirects admins to `/admin`, and the
+middleware bounces non-approved users to `/pending` - one check here is
+enough regardless of role or status). A signed-out visitor sees the
+logo, the academy name, a one-line description, and "Log in" / "Register"
+buttons - nothing else. Same `bg-white` logo-chip exception as the app
+shell (the PNG needs a light background baked in, see "Brand theme"
+above).
+
+### `/dev/audio-recorder-test` is gone
+
+Deleted along with its whole `dev/` folder. It was a scratch harness for
+`<AudioRecorder>`, explicitly commented as disposable once the component
+was wired into a real feature - that happened twice over (exam speaking
+questions, then assignments), so it had been outliving its purpose for a
+while. **No `/dev/*` or scratch routes remain anywhere in the app.**
+
+### `/grades` and `/exams/my-exams` now redirect staff away
+
+Neither page had a role gate before - RLS already made them harmless for
+a teacher/admin (their `student_id`-scoped queries just came back empty),
+but landing on an empty "nothing here" page isn't useful for a role that
+was never the audience. Added
+[`requireStudent()`](apps/web/src/lib/supabase/require-student.ts),
+mirroring the existing `requireStaff()`/`requireAdmin()` shape exactly:
+redirects a signed-out visitor to `/login`, a non-student to `/dashboard`,
+otherwise returns `{ supabase, user }` for the page to use. Applied to
+`/grades`, `/exams/my-exams`, `/exams/my-exams/[examId]`, and
+`/exams/my-exams/[examId]/results` - student behavior is unchanged,
+these four just gained a redirect for everyone else.
+
+### Admin was already inside the shared shell
+
+Checked rather than assumed: `/admin` and every `/admin/*` page have
+lived under the `(app)` route group since Step 7 part 4 (see "The `(app)`
+route group" above), so they already get the same sidebar, theme,
+dark-mode toggle, logo, and logout as every other page - there was no
+separate admin layout to fold in. The only thing that looked like an
+inconsistency (`/admin`'s own hub page using the wider `max-w-5xl`
+overview container while `/admin/courses`, `/admin/classes`, and
+`/admin/registrations` use `max-w-2xl`) turned out to be correct as-is:
+`max-w-2xl` is the app-wide convention for focused detail/list pages
+(exams, classes, grading - all of them use it), and `max-w-5xl` is
+reserved for overview-style hub pages (the two dashboards, `/admin`, and
+the new `/classes` index below). Matching admin's sub-pages to the wider
+container would have made them inconsistent with the rest of the app,
+not more consistent with it.
+
+### A missing page, found while finalizing the nav
+
+Wiring in "My classes" (student) / "Classes" (teacher) surfaced a real
+gap: there was no page for either to link to. Classes were only ever
+reachable through the dashboard's own "My classes" card - there'd never
+been a plain `/classes` index. Added
+[`(app)/classes/page.tsx`](apps/web/src/app/(app)/classes/page.tsx),
+reusing the exact same RLS-scoped query the dashboards already run (a
+student's enrolled classes or a teacher's taught classes, zero extra
+filtering needed) - a small, real "connect everything" gap this task
+happened to catch, not scope creep.
+
+### Finalized per-role nav
+
+[`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx)'s
+`getNavItems()`, settled:
+
+| Role | Nav items |
+|---|---|
+| Student | Dashboard, My classes, My exams, Grades |
+| Teacher | Dashboard, Classes, Exams, Question bank, Grading queue |
+| Admin | Admin home, Registrations (live pending-count badge), Courses, Classes, Exams, Question bank, Grading queue |
+
+Every item links to a route that exists and is reachable with one click
+from anywhere in the app - no URL-only areas left for any role. Deeper,
+class-scoped navigation (a specific class's assignments/attendance/
+grades) still lives one click further in, via each class page's own
+buttons, exactly as it did before - the top-level nav was never meant to
+flatten that, just to make sure every *area* has a real entry point.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build all pass clean. Confirmed
+in the browser: the new `/` renders the logo, tagline, and both buttons
+with correct hrefs for a signed-out visitor; `/dev/audio-recorder-test`
+now 404s; `/classes` redirects a signed-out visitor to `/login` the same
+as every other protected route. **Not yet done:** no disposable-account
+walkthrough of the redirect behavior itself (a teacher actually hitting
+`/grades`/`/exams/my-exams` and landing on `/dashboard`, a signed-in
+visitor hitting `/` and landing on the right one of `/dashboard`/`/admin`/
+`/pending`) - this sandbox has no login credentials for the live project,
+same limitation noted throughout this file.
+
+## Support access & contact links
+
+Polish pass on the three public pages plus a shared Support dialog for
+signed-in users - no schema changes, no new backend, just UI and one
+small shared config file.
+
+### `lib/contact.ts` — the one file to edit before launch
+
+[`lib/contact.ts`](apps/web/src/lib/contact.ts) is the single source of
+truth for MIG's public contact/social links - `tiktok`, `instagram`,
+`facebook`, `whatsapp` (a raw digits-only number, used to build a
+`wa.me` link), and `email` (used to build a `mailto:` link). Both the
+landing page footer and the shared Support dialog call the same
+`getContactLinks()` instead of hardcoding links twice, so a link only
+ever needs updating in this one place.
+
+**Every value is currently the literal placeholder `"REPLACE_ME"` -
+these need to be replaced with real values before go-live** (added to
+the Step 8 launch checklist below). Handled gracefully in the meantime:
+`getContactLinks()` reports `href: null` for anything still a
+placeholder, and the rendering side (`<ContactLinks>` in
+[`components/contact-links.tsx`](apps/web/src/components/contact-links.tsx))
+renders that as a disabled icon with a "Coming soon" title instead of a
+dead `href="#"`. Verified directly in the browser: with all five values
+still at their placeholder default, all five render as non-clickable
+`<span>`s (confirmed via the accessibility tree, not just visually) - the
+disabled path actually works, not just the happy path.
+
+**No brand icons exist in this project's installed `lucide-react`** -
+checked directly in `node_modules` rather than assumed, since this app's
+own `AGENTS.md` warns this tooling can differ from what training data
+expects. This version ships zero logo/brand icons (no tiktok, whatsapp,
+instagram, facebook - only generic UI icons like `Mail`). Rather than add
+a whole new
+icon-library dependency for four icons,
+[`components/icons/brand-icons.tsx`](apps/web/src/components/icons/brand-icons.tsx)
+hand-includes small single-path SVGs for TikTok/Instagram/Facebook/
+WhatsApp (email reuses lucide's own `Mail`). These are simplified
+outlines, not pixel-exact brand marks, and this sandbox can't
+screenshot-verify logo fidelity - worth a quick visual check once this
+renders for real.
+
+### Branded background, shared across all three public pages
+
+[`components/branded-background.tsx`](apps/web/src/components/branded-background.tsx)
+is three large, blurred, low-opacity gradient circles (`--foreground` at
+6%, `--accent`/`--gold` at 10%) drifting slowly via CSS keyframes
+(`blob-drift-a`/`blob-drift-b` in
+[`globals.css`](apps/web/src/app/globals.css)) - `pointer-events-none`
+and `-z-10` so it's strictly decorative and never intercepts clicks or
+competes with text contrast. Colors come from theme tokens, not hardcoded
+hex, so it's correct in both light and dark automatically: "black" is
+literally `--foreground` (dark in light mode, light in dark mode), so the
+same component reads correctly on both without an if/else. `/`, `/login`,
+and `/signup` all use it now, so the three public pages read as one
+consistent branded experience rather than a fancy landing page bolted
+onto plain auth forms.
+
+`prefers-reduced-motion: reduce` is handled with a plain CSS media query
+(`animation: none !important` on the three animation classes) - no JS
+media-query detection needed, and it degrades to exactly the "static
+gradient fallback" asked for: the blobs stay visible, just frozen in
+their initial position instead of removed entirely.
+
+### The landing page fits one screen
+
+[`app/page.tsx`](apps/web/src/app/page.tsx)'s outer wrapper is
+`min-h-screen flex flex-col`, with the hero content taking `flex-1
+items-center justify-center` and the contact footer following naturally
+after it - on a normal viewport this fills exactly one screen with the
+footer pinned to the bottom edge, but nothing clips or gets forced off
+a truly small screen; it scrolls instead, same as the rest of this app's
+pages already do.
+
+### Shared Support dialog
+
+[`components/support-dialog.tsx`](apps/web/src/components/support-dialog.tsx)
+reuses the existing `<Dialog>` primitive (the same one `<ConfirmDialog>`
+and the mobile nav drawer already build on) rather than a new modal
+pattern. WhatsApp and email are the two primary buttons (real "contact
+us" actions); the same `<ContactLinks>` row from the landing footer sits
+below for the socials - one component, two places, always in sync with
+`lib/contact.ts`. Wired into
+[`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx)'s
+`userFooter`, which is already rendered twice (desktop sidebar + mobile
+drawer, same as `<ThemeToggle>`/`<LogoutButton>`), so every role sees
+"Need help?" without any role-specific wiring. `<LogoutButton>` was made
+`w-full` at the same time so the two stacked buttons line up rather than
+sizing to their own text width.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build all pass clean. Confirmed
+in the browser: all five contact links render disabled with "Coming
+soon" titles (not `href="#"`) while still on placeholder values; the
+background blobs are present with the correct animation name and opacity
+in computed styles; `/login` carries the same background and correctly
+resolves to the `dark` class under a forced dark color scheme, same as
+`/`. **Not yet done:** the Support dialog itself hasn't been opened and
+clicked through in a real logged-in session (no credentials in this
+sandbox), and the hand-included brand SVGs haven't been visually
+compared against the real logos - worth a look once you're viewing this
+rendered for real, before replacing the `REPLACE_ME` placeholders makes
+them clickable.
+
 ## Progress / plan
 
 - [x] **Step 1** — Verified Node/pnpm/git installed, scaffolded the Turborepo
@@ -976,14 +2022,6 @@ hole.
       surfaced and fixed (a `getUserMedia`-on-mount bug, and a Next.js
       dev-server cross-origin hydration bug that only showed up when
       testing through a tunnel).
-- [ ] Later (next) — wire `<AudioRecorder>` into the exam flow as an
-      actual speaking-question answer (parts 2/3 of the Step 5 part 2
-      speaking work) - the component and its bucket exist but aren't
-      connected to anything yet.
-- [ ] Later — wire `<AudioRecorder>` into assignments too, as a speaking-
-      practice submission option alongside the existing text/file
-      submission - a separate integration point from the exam one above,
-      not yet scoped in detail.
 - [ ] Later — wire the exam finalize-on-read sweep to a real scheduler
       (Vercel Cron or Supabase `pg_cron`). **Hard prerequisite before any
       real certification exam runs** - without it, an attempt nobody
@@ -995,8 +2033,126 @@ hole.
       reuse it. Zero new migrations needed (existing RLS already
       supported it). Attendance UI and a grades/marks overview
       deliberately not built yet - separate, still-open steps.
-- [ ] Later — build out attendance UI and a grades/marks overview.
-- [ ] Later — Vercel deployment.
+- [x] **Speaking wired into exams** — `<AudioRecorder>` is now the real
+      answer UI for a speaking question during an exam attempt
+      (invigilated mode: 1 attempt, no re-recording), gated behind a
+      mandatory pre-start mic check whenever the exam contains one, and
+      played back (not shown as raw text) in both the grading queue and
+      the student's results page. The deferred teacher read policy on the
+      `speaking-answers` bucket is now in place too, scoped to the class's
+      own teacher plus admins (see "Speaking questions wired into exams"
+      above for the full design). Code complete, typechecked, linted, and
+      a full production build passes clean. **Not yet done:** the new
+      migration hasn't been applied to the remote project, and a full
+      disposable-account walkthrough plus real-microphone testing are
+      still outstanding.
+- [x] **Speaking wired into assignments** — completes the speaking
+      feature: `<AudioRecorder>` is now also the answer UI for an
+      assignment marked `requires_audio`, in practice mode (free
+      re-record, generous duration/attempts, internal mic test kept on -
+      the opposite tradeoffs from the exam's invigilated mode, see
+      "Speaking wired into assignments (practice mode)" above). Teacher
+      grading reuses the same widened `speaking_answers_teacher_select`
+      RLS policy as exam grading, not a new one. Code complete,
+      typechecked, linted, and a full production build passes clean.
+      **Not yet done:** the new migration hasn't been applied to the
+      remote project, and there's been no disposable-account walkthrough
+      or real-microphone testing yet.
+- [x] **Step 7 part 1** — Attendance UI (see "Attendance UI" above):
+      teacher session creation + roster editor (default-to-present,
+      quick summary, edit-a-past-session support via one upsert), student
+      own-record view with a present/recorded summary, admin reuses the
+      teacher view. Zero new migrations - `class_sessions`/`attendance`
+      and their RLS already existed from the initial schema, this was
+      pure UI. Code complete, typechecked, linted, and a full production
+      build passes clean. **Not yet done:** no disposable-account
+      walkthrough yet.
+- [x] **Step 7 part 2** — Grades/marks overview (see "Grades / marks
+      overview" above): student `/grades` (assignments + exam results,
+      grouped by class, pending/provisional never counted as a zero) and
+      a per-class teacher gradebook at `/classes/[classId]/grades`
+      (per-student point totals plus quick links from ungraded items
+      into the existing grading screens). Zero new migrations - pure UI
+      over existing RLS, plus one new narrowly-scoped function
+      (`getMyExamSummaries()`) in `attempt-engine.ts` for the one piece a
+      student can't read directly (exam max-points, since
+      `question_bank`/`exam_questions` stay staff-only by design). Code
+      complete, typechecked, linted, and a full production build passes
+      clean. **Not yet done:** no disposable-account walkthrough yet.
+- [x] **Step 7 part 3** — Self-registration with admin approval (see
+      "Self-registration & admin approval" above): a new `profiles.status`
+      (pending/approved/rejected) gates real data access at the RLS
+      level, not just in the UI - baked into the four foundational
+      helper functions (`is_admin`/`is_teacher`/`teaches_class`/
+      `is_enrolled`) plus individual fixes for the handful of policies
+      that check `auth.uid()` directly without going through a helper.
+      `requested_role` records what a new user asked for at signup
+      (informational only, grants nothing). New signups land on a
+      `/pending` status screen until an admin approves (choosing/
+      confirming the real role) or rejects them from the new
+      `/admin/registrations` queue. **This is the least-verified feature
+      in the app**: code complete, typechecked, linted, and a full
+      production build passes clean, but the migration hasn't been
+      applied to the remote project and none of the actual gating
+      behavior has been exercised against a real account yet - review the
+      migration closely before relying on it.
+- [x] **Step 7 part 4** — Shell & role-based dashboards (see "Shell &
+      role-based dashboards" above): every authenticated route moved
+      into an `(app)` route group sharing one persistent nav shell
+      (sidebar on desktop, slide-over drawer on mobile), a real
+      light/dark theme toggle (`.dark` in `globals.css` properly
+      re-themed for the first time, not shadcn's stock gray), and
+      `/dashboard` rebuilt as two distinct overview screens (student:
+      upcoming work, classes, recent grades; teacher: needs-grading
+      queue, classes with live counts, recent exams/assignments) instead
+      of one generic card list. Zero new migrations - reuses existing
+      data/routes/RLS throughout.
+- [x] **Pre-launch route cleanup** (see "Pre-launch route cleanup" above)
+      — the review-driven follow-up to Step 7 part 4: a real `/` landing
+      page (redirects a signed-in visitor to `/dashboard`, replacing the
+      old unwired "Theme preview" scaffold), `/dev/audio-recorder-test`
+      deleted (no `/dev/*` or scratch routes remain anywhere), a new
+      `requireStudent()` guard redirecting staff away from `/grades` and
+      `/exams/my-exams` (+ subpages) to `/dashboard`, confirmation that
+      `/admin` was already inside the shared shell with nothing left to
+      fold in, a new `/classes` index page (the one real gap the nav
+      finalization pass surfaced), and the per-role nav lists finalized
+      so every role has one-click access to every real area. Code
+      complete, typechecked, linted, and a full production build passes
+      clean. **Not yet done:** no disposable-account walkthrough of the
+      redirect behavior or the rendered dashboards yet - this sandbox has
+      no login credentials for the live project.
+- [x] **Support access & contact links** (see "Support access & contact
+      links" above): a single shared config
+      ([`lib/contact.ts`](apps/web/src/lib/contact.ts), currently all
+      `"REPLACE_ME"` placeholders) feeding both a new landing-page
+      contact footer and a shared Support dialog reachable from every
+      role in the app shell; a subtle animated gradient background
+      (theme-token colors, respects `prefers-reduced-motion`) applied
+      consistently across `/`, `/login`, and `/signup`. No schema
+      changes. Code complete, typechecked, linted, and a full production
+      build passes clean. **Not yet done:** the Support dialog hasn't
+      been opened in a real logged-in session, and the hand-included
+      brand SVGs (this project's `lucide-react` ships no brand icons at
+      all) haven't been visually compared against the real logos.
+- [ ] **Step 8 (before go-live)** — Launch checklist:
+  - [ ] Re-enable email confirmation (`mailer_autoconfirm: false` via the
+        Supabase Management API, or the dashboard toggle once it's
+        located — see "Authentication" above for why it's off right now).
+  - [ ] Finish Resend setup: verify a real domain at
+        [resend.com/domains](https://resend.com/domains), then update the
+        Supabase SMTP "from" address to use that verified domain.
+        **Until this is done, confirmation emails only actually deliver
+        to `malakseddik3@gmail.com`** (Resend's test-mode restriction) —
+        signup for any other address will silently fail to send a real
+        email even with confirmation re-enabled.
+  - [ ] Replace every `"REPLACE_ME"` value in
+        [`lib/contact.ts`](apps/web/src/lib/contact.ts) with real
+        TikTok/Instagram/Facebook links, a real WhatsApp number, and a
+        real support email - until then, all five contact icons render
+        disabled ("Coming soon") on the landing footer and in the
+        Support dialog.
+  - [ ] Vercel deployment.
 
 Brand theme (logo, palette, shadcn setup) was done as an unnumbered
 detour between Step 1 and Step 2 — see the "Brand theme" section above.

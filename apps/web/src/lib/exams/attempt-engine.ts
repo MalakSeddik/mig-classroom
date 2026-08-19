@@ -42,28 +42,27 @@ function windowStatus(a: { starts_at: string | null; ends_at: string | null }, n
   return "open" as const;
 }
 
+type EligibilityResult =
+  | { kind: "error"; message: string }
+  | { kind: "not-assigned" }
+  | { kind: "not-open"; reason: "not-open-yet" | "closed"; opensAt: string | null; closesAt: string | null }
+  | { kind: "eligible"; durationMinutes: number };
+
 /**
- * Eligibility + window + one-attempt-only + question delivery, all in one
- * place. Runs entirely on the admin (service_role) client after
- * independently verifying the caller via getUser() - this is the
- * "tightly scoped to an already-verified user" case admin.ts's own doc
- * comment describes. question_bank's correct_answer/accepted_answers
- * columns are never selected by the query below in the first place, so
- * there's nothing to accidentally leak into the sanitized payload.
+ * Shared by getExamStartInfo (read-only preview, used to gate on a mic
+ * check before the clock starts) and startOrResumeAttempt (the real
+ * thing) - assignment + window checks only, no attempt row is touched
+ * here either way.
  */
-export async function startOrResumeAttempt(examId: string): Promise<StartAttemptResult> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { kind: "error", message: "You must be signed in." };
-
-  const admin = createAdminClient();
-
+async function resolveEligibility(
+  examId: string,
+  userId: string,
+  admin: ReturnType<typeof createAdminClient>
+): Promise<EligibilityResult> {
   const { data: myAssignments } = await admin
     .from("exam_assignment_students")
     .select("exam_assignments(id, exam_id, starts_at, ends_at)")
-    .eq("student_id", user.id)
+    .eq("student_id", userId)
     .returns<{ exam_assignments: ResolvedAssignment | null }[]>();
 
   const relevant = (myAssignments ?? [])
@@ -99,6 +98,92 @@ export async function startOrResumeAttempt(examId: string): Promise<StartAttempt
     .single<{ id: string; duration_minutes: number }>();
   if (!exam) return { kind: "not-assigned" };
 
+  return { kind: "eligible", durationMinutes: exam.duration_minutes };
+}
+
+export type ExamStartInfo =
+  | { kind: "error"; message: string }
+  | { kind: "not-assigned" }
+  | { kind: "not-open"; reason: "not-open-yet" | "closed"; opensAt: string | null; closesAt: string | null }
+  | { kind: "already-completed"; attemptId: string }
+  | { kind: "resume" }
+  | { kind: "ready"; examTitle: string; durationMinutes: number; hasSpeaking: boolean };
+
+/**
+ * Read-only preview of "what would happen if this student tried to start
+ * examId right now" - same eligibility rules as startOrResumeAttempt, but
+ * never creates an exam_attempts row, so it never starts the clock.
+ * Exists specifically so the take-exam page can find out whether this
+ * exam contains a speaking question (and warn + require a mic check)
+ * *before* committing to starting the timed attempt. If an attempt is
+ * already in_progress, the clock is already running regardless, so this
+ * returns "resume" and the page skips the gate entirely.
+ */
+export async function getExamStartInfo(examId: string): Promise<ExamStartInfo> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { kind: "error", message: "You must be signed in." };
+
+  const admin = createAdminClient();
+  const eligibility = await resolveEligibility(examId, user.id, admin);
+  if (eligibility.kind !== "eligible") return eligibility;
+
+  const { data: existingAttempt } = await admin
+    .from("exam_attempts")
+    .select("id, status")
+    .eq("exam_id", examId)
+    .eq("student_id", user.id)
+    .maybeSingle<{ id: string; status: string }>();
+
+  if (existingAttempt) {
+    if (existingAttempt.status !== "in_progress") {
+      return { kind: "already-completed", attemptId: existingAttempt.id };
+    }
+    return { kind: "resume" };
+  }
+
+  const { data: exam } = await admin.from("exams").select("title").eq("id", examId).single<{ title: string }>();
+
+  const { data: examQuestions } = await admin
+    .from("exam_questions")
+    .select("question_bank(type)")
+    .eq("exam_id", examId)
+    .returns<{ question_bank: { type: string } | null }[]>();
+
+  const hasSpeaking = (examQuestions ?? []).some((eq) => eq.question_bank?.type === "speaking");
+
+  return {
+    kind: "ready",
+    examTitle: exam?.title ?? "",
+    durationMinutes: eligibility.durationMinutes,
+    hasSpeaking,
+  };
+}
+
+/**
+ * Eligibility + window + one-attempt-only + question delivery, all in one
+ * place. Runs entirely on the admin (service_role) client after
+ * independently verifying the caller via getUser() - this is the
+ * "tightly scoped to an already-verified user" case admin.ts's own doc
+ * comment describes. question_bank's correct_answer/accepted_answers
+ * columns are never selected by the query below in the first place, so
+ * there's nothing to accidentally leak into the sanitized payload.
+ */
+export async function startOrResumeAttempt(examId: string): Promise<StartAttemptResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { kind: "error", message: "You must be signed in." };
+
+  const admin = createAdminClient();
+
+  const eligibility = await resolveEligibility(examId, user.id, admin);
+  if (eligibility.kind !== "eligible") return eligibility;
+  const durationMinutes = eligibility.durationMinutes;
+
   const { data: existingAttempt } = await admin
     .from("exam_attempts")
     .select("id, started_at, status")
@@ -114,8 +199,8 @@ export async function startOrResumeAttempt(examId: string): Promise<StartAttempt
       return { kind: "already-completed", attemptId: existingAttempt.id };
     }
 
-    const elapsedSeconds = (now - new Date(existingAttempt.started_at).getTime()) / 1000;
-    if (elapsedSeconds > exam.duration_minutes * 60 + SUBMIT_GRACE_SECONDS) {
+    const elapsedSeconds = (Date.now() - new Date(existingAttempt.started_at).getTime()) / 1000;
+    if (elapsedSeconds > durationMinutes * 60 + SUBMIT_GRACE_SECONDS) {
       // The student let the clock run out without ever submitting -
       // finalize it now, on this read, rather than leaving it stuck
       // in_progress forever. See finalizeExpiredIfNeeded for the other
@@ -186,7 +271,7 @@ export async function startOrResumeAttempt(examId: string): Promise<StartAttempt
 
   return {
     kind: "active",
-    attempt: { id: attemptId, startedAt, durationMinutes: exam.duration_minutes },
+    attempt: { id: attemptId, startedAt, durationMinutes },
     questions,
     existingAnswers,
   };
@@ -425,6 +510,9 @@ export type AttemptBreakdownItem = {
   mediaType: string | null;
   options: string[] | null;
   response: string | null;
+  // Only set for type "speaking" with a saved response - response itself
+  // is a speaking-answers storage path in that case, not readable text.
+  answerAudioUrl: string | null;
   isCorrect: boolean | null;
   pointsAwarded: number | null;
   feedback: string | null;
@@ -524,6 +612,8 @@ export async function getAttemptBreakdown(attemptId: string): Promise<{ error: s
       mediaType: qb.media_type,
       options: qb.options,
       response: ans?.response ?? null,
+      answerAudioUrl:
+        qb.type === "speaking" && ans?.response ? await createSignedUrlAdmin("speaking-answers", ans.response) : null,
       isCorrect: ans?.is_correct ?? null,
       pointsAwarded: ans?.points_awarded ?? null,
       feedback: ans?.feedback ?? null,
@@ -543,4 +633,92 @@ export async function getAttemptBreakdown(attemptId: string): Promise<{ error: s
     },
     items,
   };
+}
+
+export type MyExamSummary = {
+  attemptId: string;
+  examId: string;
+  examTitle: string;
+  classId: string | null;
+  className: string | null;
+  isCertification: boolean;
+  status: string;
+  totalScore: number | null;
+  maxScore: number;
+};
+
+/**
+ * Lightweight per-attempt summary for the student's own grades overview
+ * (/grades) - deliberately leaner than getAttemptBreakdown: no per-
+ * question prompts, options, or media/signed URLs, since the overview
+ * only needs one number (max possible points) per exam. Only ever
+ * returns this student's own finalized attempts (auto_graded or final) -
+ * an in_progress attempt has no meaningful score yet, so it's excluded
+ * rather than shown as zero, same "never invent a zero" rule the rest of
+ * this page follows.
+ *
+ * Uses the admin client to sum exam_questions/question_bank.points,
+ * since students have zero RLS grant on either table (by design - see
+ * "Delivery: how correct_answer stays off the wire" in CLAUDE.md). Safe
+ * despite the bypass: the query only ever selects the `points` column,
+ * never prompt/options/correct_answer/accepted_answers, and only for
+ * exam_ids drawn from this caller's own attempts - never exposing a
+ * total for an exam the student hasn't taken.
+ */
+export async function getMyExamSummaries(): Promise<MyExamSummary[]> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return [];
+
+  const admin = createAdminClient();
+
+  type AttemptRow = {
+    id: string;
+    exam_id: string;
+    status: string;
+    total_score: number | null;
+    exams: {
+      title: string;
+      class_id: string | null;
+      is_certification: boolean;
+      classes: { name: string } | null;
+    } | null;
+  };
+
+  const { data: attempts } = await admin
+    .from("exam_attempts")
+    .select("id, exam_id, status, total_score, exams(title, class_id, is_certification, classes(name))")
+    .eq("student_id", user.id)
+    .in("status", ["auto_graded", "final"])
+    .returns<AttemptRow[]>();
+
+  if (!attempts || attempts.length === 0) return [];
+
+  const examIds = [...new Set(attempts.map((a) => a.exam_id))];
+
+  const { data: examQuestions } = await admin
+    .from("exam_questions")
+    .select("exam_id, points_override, question_bank(points)")
+    .in("exam_id", examIds)
+    .returns<{ exam_id: string; points_override: number | null; question_bank: { points: number } | null }[]>();
+
+  const maxByExam = new Map<string, number>();
+  for (const eq of examQuestions ?? []) {
+    const pts = eq.points_override ?? eq.question_bank?.points ?? 0;
+    maxByExam.set(eq.exam_id, (maxByExam.get(eq.exam_id) ?? 0) + pts);
+  }
+
+  return attempts.map((a) => ({
+    attemptId: a.id,
+    examId: a.exam_id,
+    examTitle: a.exams?.title ?? "",
+    classId: a.exams?.class_id ?? null,
+    className: a.exams?.classes?.name ?? null,
+    isCertification: a.exams?.is_certification ?? false,
+    status: a.status,
+    totalScore: a.total_score,
+    maxScore: maxByExam.get(a.exam_id) ?? 0,
+  }));
 }

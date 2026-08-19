@@ -27,6 +27,13 @@ export function isAutoGraded(type: string): boolean {
   return AUTO_GRADED_TYPES.has(type as QuestionType);
 }
 
+// question_bank has no per-question recording-length column, so a
+// speaking answer's cap is a fixed constant rather than something set per
+// question. Invigilated mode: one take, no re-recording - matches a real
+// speaking exam rather than practice.
+export const SPEAKING_ANSWER_MAX_DURATION_SECONDS = 120;
+export const SPEAKING_ANSWER_MAX_ATTEMPTS = 1;
+
 // Normalizes text for auto-grading comparison: trims, lowercases, then
 // folds German umlauts/eszett to their unaccented ASCII spelling, so
 // "Straße", "strasse", and "STRASSE" all compare equal. Used for both

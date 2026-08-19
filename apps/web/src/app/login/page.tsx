@@ -6,6 +6,7 @@ import { login, type LoginState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandedBackground } from "@/components/branded-background";
 import {
   Card,
   CardHeader,
@@ -20,7 +21,8 @@ export default function LoginPage() {
   const [state, formAction, pending] = useActionState(login, initialState);
 
   return (
-    <div className="flex flex-1 items-center justify-center px-4 py-12">
+    <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-background px-4 py-12">
+      <BrandedBackground />
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Log in</CardTitle>

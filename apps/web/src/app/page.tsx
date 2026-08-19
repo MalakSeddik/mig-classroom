@@ -1,84 +1,61 @@
+import Link from "next/link";
 import Image from "next/image";
+import { redirect } from "next/navigation";
+import { getCurrentProfile } from "@/lib/supabase/current-user";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from "@/components/ui/card";
+import { BrandedBackground } from "@/components/branded-background";
+import { ContactLinks } from "@/components/contact-links";
 
-const navItems = [
-  { label: "Dashboard", active: true },
-  { label: "Assignments", active: false },
-  { label: "Grades", active: false },
-];
+/**
+ * The public front door. A signed-in visitor is sent straight to
+ * /dashboard rather than shown this - /dashboard itself then redirects
+ * admins to /admin and non-approved users get bounced to /pending by the
+ * middleware, so this one check is enough regardless of role or status.
+ */
+export default async function Home() {
+  const profile = await getCurrentProfile();
+  if (profile) {
+    redirect("/dashboard");
+  }
 
-export default function Home() {
   return (
-    <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between border-b border-border bg-card px-6 py-3">
-        <div className="flex items-center gap-8">
-          <Image
-            src="/mig-logo.png"
-            alt="MIG Classroom logo"
-            width={54}
-            height={44}
-            priority
-          />
-          <nav className="flex items-center gap-6 text-sm font-medium">
-            {navItems.map((item) => (
-              <a
-                key={item.label}
-                href="#"
-                className={
-                  item.active
-                    ? "border-b-2 border-accent pb-1 text-accent"
-                    : "pb-1 text-muted-foreground transition-colors hover:text-foreground"
-                }
-              >
-                {item.label}
-              </a>
-            ))}
-          </nav>
-        </div>
-      </header>
+    <div className="relative flex min-h-screen flex-1 flex-col overflow-hidden bg-background">
+      <BrandedBackground />
 
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-12">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Theme preview
-          </h1>
-          <p className="mt-1 text-muted-foreground">
-            A quick look at the MIG Classroom brand colors in action.
-          </p>
-        </div>
+      <div className="flex flex-1 flex-col items-center justify-center px-6 py-16">
+        <div className="flex w-full max-w-md flex-col items-center gap-8 text-center">
+          {/* The logo PNG has a light background baked in (see "Brand
+              theme" in CLAUDE.md) - a literal white chip, not a theme
+              token, same deliberate exception used in the app shell. */}
+          <span className="flex items-center justify-center rounded-2xl bg-white p-4 shadow-sm">
+            <Image src="/mig-logo.png" alt="MIG Classroom logo" width={88} height={72} priority />
+          </span>
 
-        <div className="flex flex-wrap gap-3">
-          <Button>Primary action</Button>
-          <Button variant="destructive">Delete account</Button>
-        </div>
+          <div className="flex flex-col gap-2">
+            <h1 className="text-3xl font-semibold tracking-tight">MIG Classroom</h1>
+            <p className="text-muted-foreground">
+              The online classroom for MIG&apos;s German-language academy - assignments, exams,
+              attendance, and grades, all in one place.
+            </p>
+          </div>
 
-        <Card className="max-w-sm">
-          <CardHeader>
-            <CardTitle>German A1 &mdash; Module 3</CardTitle>
-            <CardDescription>
-              Next assignment due Friday. Keep up the good work!
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">
-              Course completion
-            </span>
-            <span className="text-sm font-medium">72%</span>
-          </CardContent>
-        </Card>
-
-        <div>
-          <Badge className="bg-gold text-gold-foreground">Certified</Badge>
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:justify-center">
+            <Button asChild size="lg" className="flex-1 sm:flex-none sm:px-8">
+              <Link href="/login">Log in</Link>
+            </Button>
+            <Button asChild size="lg" variant="outline" className="flex-1 sm:flex-none sm:px-8">
+              <Link href="/signup">Register</Link>
+            </Button>
+          </div>
         </div>
-      </main>
+      </div>
+
+      <footer className="flex flex-col items-center gap-3 border-t border-border/60 px-6 py-6">
+        <ContactLinks />
+        <p className="text-xs text-muted-foreground">
+          &copy; {new Date().getFullYear()} MIG Classroom. All rights reserved.
+        </p>
+      </footer>
     </div>
   );
 }

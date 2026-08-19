@@ -165,11 +165,33 @@ export function AudioRecorder({
   maxAttempts,
   allowReRecord,
   onUploaded,
+  onMicCheckPassed,
+  skipMicTest = false,
+  showDebugPanel = false,
 }: {
   maxDurationSeconds: number;
   maxAttempts: number;
   allowReRecord: boolean;
   onUploaded: (path: string) => void;
+  // Fires once the mic-check clip has been recorded and played back, i.e.
+  // right when the phase moves past "test-recorded" to "ready" - lets a
+  // parent reuse this component purely as a pre-start mic-check gate
+  // (see <ExamStartScreen>) without caring about the rest of its phases.
+  onMicCheckPassed?: () => void;
+  // When true, once mic permission is granted this skips straight to the
+  // "ready to record" phase instead of forcing a record-a-test-clip-and-
+  // play-it-back step. For callers where a mic check already happened
+  // somewhere else first (an exam's <ExamStartScreen> gate) - re-running
+  // it per question would waste exam time on a redundant check. Leave
+  // false (default) wherever there's no earlier gate, e.g. a future
+  // assignments speaking submission.
+  skipMicTest?: boolean;
+  // The phase/capabilities/last-error panel was built for troubleshooting
+  // real-device mic issues with no console access (see CLAUDE.md) - it's
+  // internal debugging output, never meant for a student to see, so it's
+  // off unless a caller explicitly opts in (only the /dev/audio-recorder-
+  // test page does).
+  showDebugPanel?: boolean;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -247,7 +269,7 @@ export function AudioRecorder({
         return;
       }
       streamRef.current = stream;
-      setPhase("test-idle");
+      setPhase(skipMicTest ? "ready" : "test-idle");
     } catch (err) {
       clearTimeout(timeoutId);
       if (requestIdRef.current !== requestId) return;
@@ -421,7 +443,14 @@ export function AudioRecorder({
               <div className="flex flex-col gap-2">
                 <audio controls src={testUrl} className="h-10 w-full max-w-sm" />
                 <div className="flex gap-2">
-                  <Button type="button" size="sm" onClick={() => setPhase("ready")}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setPhase("ready");
+                      onMicCheckPassed?.();
+                    }}
+                  >
                     Sounds good, I&apos;m ready
                   </Button>
                   <Button type="button" size="sm" variant="outline" onClick={() => startRecording(true)}>
@@ -510,7 +539,7 @@ export function AudioRecorder({
   return (
     <div className="flex flex-col gap-3">
       {content}
-      <DebugPanel phase={phase} rawError={rawError} capabilities={capabilities} />
+      {showDebugPanel && <DebugPanel phase={phase} rawError={rawError} capabilities={capabilities} />}
     </div>
   );
 }

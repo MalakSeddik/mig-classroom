@@ -1,4 +1,4 @@
-import { logout } from "@/app/dashboard/actions";
+import { logout } from "@/app/(app)/dashboard/actions";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 export function LogoutButton() {
   return (
     <form action={logout}>
-      <Button type="submit" variant="outline">
+      <Button type="submit" variant="outline" className="w-full">
         Log out
       </Button>
     </form>

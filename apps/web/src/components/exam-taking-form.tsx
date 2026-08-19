@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { saveAnswer, submitExam, type SafeQuestion } from "@/lib/exams/attempt-engine";
+import { AudioRecorder } from "@/components/audio-recorder";
+import { SpeakingRecordingPlayback } from "@/components/speaking-recording-playback";
+import { SPEAKING_ANSWER_MAX_ATTEMPTS, SPEAKING_ANSWER_MAX_DURATION_SECONDS } from "@/lib/exams/constants";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -94,6 +97,18 @@ export function ExamTakingForm({
     }, SAVE_DEBOUNCE_MS);
   }
 
+  // A recording upload is one discrete event, not keystrokes - save it
+  // immediately (through the same saveAnswer progressive-save path other
+  // answer types use) rather than debouncing. The uploaded file is already
+  // durably in Storage at this point; this just links its path to the
+  // answer row, same as everywhere else "an uploaded recording counts as
+  // saved even without a final submit click" applies.
+  function handleRecordingUploaded(questionId: string, path: string) {
+    setAnswers((prev) => ({ ...prev, [questionId]: path }));
+    if (saveTimers.current[questionId]) clearTimeout(saveTimers.current[questionId]);
+    saveAnswer(attemptId, questionId, path);
+  }
+
   const question = questions[pageIndex];
   const isLastPage = pageIndex === questions.length - 1;
   const isLowTime = remainingSeconds <= 60;
@@ -166,18 +181,26 @@ export function ExamTakingForm({
             />
           )}
 
-          {(question.type === "writing" || question.type === "speaking") && (
+          {question.type === "writing" && (
             <Textarea
               rows={5}
               value={answers[question.id] ?? ""}
               onChange={(e) => handleAnswerChange(question.id, e.target.value)}
-              placeholder={
-                question.type === "speaking"
-                  ? "Describe what you would say (typed response for now)."
-                  : undefined
-              }
             />
           )}
+
+          {question.type === "speaking" &&
+            (answers[question.id] ? (
+              <SpeakingRecordingPlayback path={answers[question.id]} />
+            ) : (
+              <AudioRecorder
+                maxDurationSeconds={SPEAKING_ANSWER_MAX_DURATION_SECONDS}
+                maxAttempts={SPEAKING_ANSWER_MAX_ATTEMPTS}
+                allowReRecord={false}
+                onUploaded={(path) => handleRecordingUploaded(question.id, path)}
+                skipMicTest
+              />
+            ))}
         </div>
       )}
 

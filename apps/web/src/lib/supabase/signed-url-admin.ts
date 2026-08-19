@@ -15,9 +15,19 @@ const SIGNED_URL_EXPIRY_SECONDS = 300; // 5 minutes
  * which checks the question belongs to the student's own in-progress or
  * completed attempt before ever reaching this function) - unlike the
  * regular createSignedUrl, there's no RLS check backing this one up.
+ *
+ * "speaking-answers" was added alongside getAttemptBreakdown's own answer
+ * playback: that function already verifies attempt.student_id === caller
+ * before doing anything else, so this is the same "already-verified
+ * caller" case, just for the student's own recording instead of exam
+ * media. The teacher-facing grading view deliberately does NOT use this -
+ * it goes through the real speaking_answers_teacher_select RLS policy
+ * instead, since "which teacher can see which class's recordings" is
+ * exactly the kind of per-caller check RLS is a better fit for than an
+ * admin-client bypass.
  */
 export async function createSignedUrlAdmin(
-  bucket: "exam-media",
+  bucket: "exam-media" | "speaking-answers",
   path: string
 ): Promise<string | null> {
   const supabase = createAdminClient();
