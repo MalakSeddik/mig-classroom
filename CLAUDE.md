@@ -2022,10 +2022,6 @@ them clickable.
       surfaced and fixed (a `getUserMedia`-on-mount bug, and a Next.js
       dev-server cross-origin hydration bug that only showed up when
       testing through a tunnel).
-- [ ] Later — wire the exam finalize-on-read sweep to a real scheduler
-      (Vercel Cron or Supabase `pg_cron`). **Hard prerequisite before any
-      real certification exam runs** - without it, an attempt nobody
-      revisits can sit `in_progress` indefinitely.
 - [x] **Step 6 part 2** — Admin panel: full CRUD on courses and classes,
       plus per-class enrollment/roster management, all under `/admin`
       (see "Admin panel" above). First reusable confirmation dialog in
@@ -2136,6 +2132,33 @@ them clickable.
       brand SVGs (this project's `lucide-react` ships no brand icons at
       all) haven't been visually compared against the real logos.
 - [ ] **Step 8 (before go-live)** — Launch checklist:
+  - [ ] **Final security pass.** Three migrations are written and tested
+        locally but not yet applied to the remote project - apply them
+        via the Dashboard SQL Editor (this repo's established workflow,
+        since the Supabase CLI isn't linked):
+        [`20260717170000_add_speaking_answers_teacher_policy.sql`](supabase/migrations/20260717170000_add_speaking_answers_teacher_policy.sql),
+        [`20260717180000_add_assignment_audio.sql`](supabase/migrations/20260717180000_add_assignment_audio.sql),
+        and
+        [`20260717190000_add_registration_approval.sql`](supabase/migrations/20260717190000_add_registration_approval.sql).
+        That last one is the self-registration/approval RLS change -
+        **the least-verified feature in the app** (see "Self-registration
+        & admin approval" above) - review it closely and walk through it
+        with a disposable account before trusting it with real signups.
+        Also re-confirm `SUPABASE_SERVICE_ROLE_KEY` (used throughout
+        `lib/supabase/admin.ts` and the exam `attempt-engine.ts`) is only
+        ever read server-side and never bundled into client code.
+  - [ ] Wire the exam finalize-on-read sweep to a real scheduler (Vercel
+        Cron or Supabase `pg_cron`) instead of relying on someone opening
+        a page to trigger it. **Hard prerequisite before any real
+        certification exam runs** - without it, an attempt nobody
+        revisits can sit `in_progress` indefinitely (see "Timer,
+        progressive save, and 'never discard, always flag'" above).
+  - [ ] Set up real database backups. This Supabase project is currently
+        on the **Free** plan, which does not include the automatic daily
+        backups / point-in-time recovery that paid plans do - confirm the
+        plan and backup settings directly in the Supabase dashboard
+        before real student grades, submissions, and exam answers are at
+        stake, and upgrade or script a backup process if needed.
   - [ ] Re-enable email confirmation (`mailer_autoconfirm: false` via the
         Supabase Management API, or the dashboard toggle once it's
         located — see "Authentication" above for why it's off right now).
@@ -2152,6 +2175,17 @@ them clickable.
         real support email - until then, all five contact icons render
         disabled ("Coming soon") on the landing footer and in the
         Support dialog.
+  - [ ] Real-device iPhone microphone test, over HTTPS, for the two
+        speaking integrations built on top of `<AudioRecorder>` since its
+        original device pass: the exam mic-check gate + `skipMicTest`
+        flow ("Speaking questions wired into exams" above) and the
+        assignment practice-mode recorder with free re-record ("Speaking
+        wired into assignments" above). The standalone component itself
+        was already verified end-to-end on a real iPhone (see "Standalone
+        `<AudioRecorder>`" above - the `getUserMedia`-on-mount and
+        dev-server cross-origin bugs found and fixed there) - this item
+        is specifically about the newer wiring layered on top, which has
+        only ever run in this sandbox (no microphone here) so far.
   - [ ] Vercel deployment.
 
 Brand theme (logo, palette, shadcn setup) was done as an unnumbered
