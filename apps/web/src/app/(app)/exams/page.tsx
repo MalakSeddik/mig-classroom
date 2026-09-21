@@ -20,7 +20,7 @@ type ExamRow = {
 };
 
 export default async function ExamsPage() {
-  const { supabase } = await requireStaff();
+  const { supabase, role } = await requireStaff();
 
   const { data: exams } = await supabase
     .from("exams")
@@ -40,9 +40,22 @@ export default async function ExamsPage() {
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-12">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Exams</h1>
-        <Link href="/exams/questions" className="text-sm text-accent hover:underline">
-          Question bank →
-        </Link>
+        <div className="flex items-center gap-4">
+          {/* Admins don't get "Grading queue" in the main nav (grading is
+              a teaching task, not a primary admin destination - see
+              CLAUDE.md's "Admin nav" section) - this link is their
+              backup route to it, reachable in context while overseeing
+              exams. Teachers already have it in their main nav, so it's
+              not duplicated here for them. */}
+          {role === "admin" && (
+            <Link href="/exams/grading" className="text-sm text-accent hover:underline">
+              Grading queue →
+            </Link>
+          )}
+          <Link href="/exams/questions" className="text-sm text-accent hover:underline">
+            Question bank →
+          </Link>
+        </div>
       </div>
 
       <Card>

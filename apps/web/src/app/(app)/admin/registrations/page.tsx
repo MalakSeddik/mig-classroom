@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { requireAdmin } from "@/lib/supabase/require-admin";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { ApproveForm } from "./approve-form";
@@ -42,12 +41,7 @@ export default async function RegistrationRequestsPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-12">
-      <div>
-        <Link href="/admin" className="text-sm text-accent hover:underline">
-          ← Back to admin
-        </Link>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Registration requests</h1>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">Registration requests</h1>
 
       <Card>
         <CardHeader>

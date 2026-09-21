@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { login, type LoginState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,17 @@ export default function LoginPage() {
   return (
     <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-background px-4 py-12">
       <BrandedBackground />
+      <Link
+        href="/"
+        className="absolute left-4 top-4 flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground sm:left-6 sm:top-6"
+      >
+        {/* Same bg-white logo-chip exception as the app shell/landing
+            page - see "Brand theme" in CLAUDE.md. */}
+        <span className="flex shrink-0 items-center justify-center rounded-md bg-white p-1">
+          <Image src="/mig-logo.png" alt="MIG Classroom" width={20} height={16} />
+        </span>
+        <span className="hidden sm:inline">MIG Classroom</span>
+      </Link>
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Log in</CardTitle>

@@ -37,6 +37,12 @@ type NavItem = {
 // not duplicated here at the top level.
 function getNavItems(role: CurrentProfile["role"], pendingRegistrations: number): NavItem[] {
   if (role === "admin") {
+    // Deliberately no "Grading queue" item here - grading is a teaching
+    // task, not a primary admin destination. An admin's grading access
+    // is unchanged (the RLS/staff-only checks don't care about nav
+    // placement) - they reach it contextually from a "Grading queue"
+    // link on the /exams page instead, as a backup capability rather
+    // than a top-level one. See CLAUDE.md's "Admin nav" section.
     return [
       { label: "Admin home", href: "/admin", icon: Shield },
       { label: "Registrations", href: "/admin/registrations", icon: UserCheck, badge: pendingRegistrations },
@@ -44,7 +50,6 @@ function getNavItems(role: CurrentProfile["role"], pendingRegistrations: number)
       { label: "Classes", href: "/admin/classes", icon: Users },
       { label: "Exams", href: "/exams", icon: FileText },
       { label: "Question bank", href: "/exams/questions", icon: BookOpen },
-      { label: "Grading queue", href: "/exams/grading", icon: ClipboardCheck },
     ];
   }
   if (role === "teacher") {
@@ -126,8 +131,8 @@ export function AppShell({
 
   const brand = (
     <Link
-      href={profile.role === "admin" ? "/admin" : "/dashboard"}
-      className="flex items-center gap-2 px-2"
+      href="/dashboard"
+      className="flex items-center gap-2 rounded-lg px-2 py-1 -mx-2 transition-colors hover:bg-sidebar-accent"
     >
       {/* The logo PNG has a light background baked in (see "Brand theme"
           in CLAUDE.md) - a literal white chip here, not a theme token, so

@@ -106,12 +106,7 @@ export default async function MyGradesPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-12">
-      <div>
-        <Link href="/dashboard" className="text-sm text-accent hover:underline">
-          ← Back to dashboard
-        </Link>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">My grades</h1>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">My grades</h1>
 
       {classNames.length === 0 && (
         <p className="text-sm text-muted-foreground">Nothing graded or submitted yet.</p>

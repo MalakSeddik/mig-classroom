@@ -49,12 +49,7 @@ export default async function AdminClassesPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-12">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Classes</h1>
-        <Link href="/admin" className="text-sm text-accent hover:underline">
-          ← Admin
-        </Link>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">Classes</h1>
 
       <Card>
         <CardHeader>
