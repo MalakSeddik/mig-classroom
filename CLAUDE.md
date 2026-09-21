@@ -1972,6 +1972,419 @@ compared against the real logos - worth a look once you're viewing this
 rendered for real, before replacing the `REPLACE_ME` placeholders makes
 them clickable.
 
+## Background animation visibility fix + admin nav grading relocation
+
+A follow-up polish pass, prompted by the background animation reading as
+frozen. No schema changes, no new routes.
+
+### The background wasn't actually frozen - it was invisible
+
+Diagnosed rather than assumed: computed styles on the live page confirmed
+`animationPlayState: "running"` on all three blobs the whole time, and
+stacking order was already correct (the blob layer's `-z-10` paints above
+the page's own `bg-background` but below normal content, per the CSS
+stacking-context spec - the negative-z-index child is *not* hidden behind
+the containing block's own background). The real problem was contrast:
+6-10% opacity combined with a 64px blur (`blur-3xl`) made the shapes
+nearly indistinguishable from the near-white `--background`, so the
+motion had nothing visible to move. Fixed in
+[`components/branded-background.tsx`](apps/web/src/components/branded-background.tsx)
+by raising opacity to 10-18% and reducing blur to 40px (`blur-2xl`) -
+still soft and clearly secondary to text, but with enough edge definition
+to actually register as drifting. Verified directly via computed styles
+on `/`, `/login`, and `/signup`, in both light and dark (the theme-token
+colors resolve correctly in both - dark mode was already active in the
+sandbox's browser session by default, light mode was forced and checked
+separately).
+
+Also checked `prefers-reduced-motion` for the record: your Windows
+"Show animations" setting (`SPI_GETCLIENTAREAANIMATION`, queried directly
+via `user32.dll`) is **on**, so `prefers-reduced-motion: reduce` was never
+the cause - confirmed separately via `matchMedia()` in the browser
+session too. The reduced-motion fallback in
+[`globals.css`](apps/web/src/app/globals.css) (freezing the blobs rather
+than removing them) is untouched and still correct.
+
+### Grading queue: teacher-facing in the main nav, admin-facing in context
+
+[`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx)'s
+admin nav no longer lists "Grading queue" - grading is a teaching task,
+not a primary admin destination, and the admin nav was getting crowded.
+Teachers keep both "Exams" and "Grading queue" in their main nav
+unchanged, since grading is core to their role. This is a navigation
+change only - `/exams/grading` and its RLS/`requireStaff()` gate are
+untouched, so an admin's actual grading capability (viewing and
+overriding any attempt, same as a teacher) is fully retained.
+
+Instead, [`(app)/exams/page.tsx`](apps/web/src/app/(app)/exams/page.tsx)
+now shows a "Grading queue →" link next to the existing "Question bank →"
+link, **conditionally rendered for `role === "admin"` only** (using the
+`role` `requireStaff()` already returns, no extra query needed) - a
+teacher visiting the same shared page doesn't see a duplicate of the link
+already in their own nav. The framing: grading is a backup capability an
+admin reaches while overseeing exams, not a top-level destination.
+
+### Verified so far
+
+TypeScript, ESLint, and a full production build all pass clean - all 29
+routes still generate, including `/exams` and `/exams/grading`. Confirmed
+via computed styles in the browser that the background renders correctly
+on all three public pages. **Not yet done:** no disposable-account
+walkthrough of the admin/teacher nav difference or the conditional
+"Grading queue →" link itself (no credentials in this sandbox) - worth a
+quick look as an admin and as a teacher before considering this closed.
+
+## Home navigation (logo links back)
+
+Small follow-up: the MIG logo now doubles as a "go home" link everywhere
+it appears, so there's a one-click way back to the right home screen
+from anywhere in the app. No schema changes, no new routes.
+
+- **Logged in, everywhere** — the app shell's logo
+  ([`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx),
+  desktop sidebar + mobile drawer) already linked somewhere, but
+  inconsistently: `/admin` for an admin, `/dashboard` for everyone else.
+  Simplified to always `href="/dashboard"` for every role - `/dashboard`
+  already redirects an admin straight to `/admin` on its own (see "Two
+  real dashboards, not one generic one" above), so an admin lands in the
+  same place either way, just via one harmless extra redirect. Added a
+  hover state (`hover:bg-sidebar-accent`, the same token the nav links
+  already hover with) so it visibly reads as clickable, which it didn't
+  before.
+- **Logged out, on `/login` and `/signup`** — these pages had no logo or
+  header at all before. Added a small link back to `/` in the top-left
+  corner (`absolute left-4 top-4`), styled to stay out of the way of the
+  centered card rather than compete with it: muted-foreground text that
+  brightens to foreground on hover, the logo text label hidden below the
+  `sm` breakpoint so it stays out of the way on narrow phones (the small
+  logo chip itself always shows). Same `bg-white` logo-chip exception as
+  everywhere else this logo appears (see "Brand theme" above).
+- **`/` itself is unchanged** - a signed-in visitor to the landing page
+  still redirects straight to `/dashboard` as before; this task was
+  about adding new links *to* home, not changing what already happens
+  *at* home.
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean. Directly
+fetched the raw server-rendered HTML for `/login` and `/signup` with
+`curl` (bypassing the browser entirely) and confirmed the `href="/"`
+link is genuinely present in the response both times - not just assumed
+from the source. **Not yet done:** the app shell's logo-to-`/dashboard`
+link hasn't been clicked in a real logged-in session for any of the
+three roles (no credentials in this sandbox, same limitation noted
+throughout this file).
+
+## Redundant back-links removed
+
+Follow-up cleanup now that every authenticated page shares the app shell's
+sidebar nav (see "Shell & role-based dashboards" above): a handful of
+pages also had their own inline "← Back to X" link at the top, left over
+from before the shell existed, when that was the only way back. Some of
+those duplicate a sidebar item exactly (pure clutter now); others are a
+real drill-down "up one level" link the sidebar doesn't provide, since
+the sidebar only ever points at a section's own list/hub, never at a
+specific item's parent. No schema changes, no new routes - just removing
+four links and tidying the header markup left behind.
+
+**Removed** (all four were a top-level section page linking straight
+back to its own role's home hub - exactly duplicating a sidebar item one
+click away):
+- [`(app)/grades/page.tsx`](apps/web/src/app/(app)/grades/page.tsx) -
+  "← Back to dashboard" (→ `/dashboard`)
+- [`(app)/admin/registrations/page.tsx`](apps/web/src/app/(app)/admin/registrations/page.tsx) -
+  "← Back to admin" (→ `/admin`)
+- [`(app)/admin/courses/page.tsx`](apps/web/src/app/(app)/admin/courses/page.tsx) -
+  "← Admin" (→ `/admin`)
+- [`(app)/admin/classes/page.tsx`](apps/web/src/app/(app)/admin/classes/page.tsx) -
+  "← Admin" (→ `/admin`)
+
+Each of these was a page's *only* internal link, so removing it also
+meant simplifying the header markup - the wrapping `<div>` (previously
+needed to stack the link above the title, or lay them out
+`justify-between`) is gone too, leaving a single plain `<h1>` matching
+the convention every link-free top-level page (`/exams`, `/classes`,
+`/exams/questions`, `/exams/grading`, `/exams/my-exams`, `/admin`
+itself) already used. `admin/registrations/page.tsx` no longer imports
+`Link` at all, since that was its only use of it - left in place would
+have been a lint error, not just dead code.
+
+**Kept** (every one of these goes from a specific *item* to its
+immediate parent *list*, or to the one specific parent item it belongs
+to - a level of navigation the sidebar genuinely doesn't provide, since
+the sidebar only links to section-level lists/hubs, never to "the thing
+one level up from where you are"):
+- A single exam → the exam list (`/exams/[examId]` → `/exams`), and the
+  assign-to-students page → that same specific exam
+  (`/exams/[examId]/assign` → `/exams/[examId]`)
+- A question → the question bank (`/exams/questions/[questionId]` and
+  `/exams/questions/new` → `/exams/questions`)
+- Grading one attempt → the grading queue
+  (`/exams/grading/[attemptId]` → `/exams/grading`)
+- A student's own single exam result → their exam list
+  (`/exams/my-exams/[examId]` and `/exams/my-exams/[examId]/results` →
+  `/exams/my-exams`)
+- Editing one admin-managed course → the courses list
+  (`/admin/courses/[courseId]` → `/admin/courses`), same pattern for a
+  class (`/admin/classes/[classId]` → `/admin/classes`)
+- A class's grades, attendance list, or a specific assignment → that
+  specific class (`/classes/[classId]/grades`,
+  `/classes/[classId]/attendance`,
+  `/classes/[classId]/assignments/[assignmentId]` → `/classes/[classId]`)
+- A specific attendance session → that class's attendance list
+  (`/classes/[classId]/attendance/[sessionId]` →
+  `/classes/[classId]/attendance`)
+- A specific submission → its assignment's submissions view
+  (`/classes/[classId]/assignments/[assignmentId]/submissions/[submissionId]`
+  → the assignment page)
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean (all 29
+routes still generate) - including confirming no unused-import lint
+error was left behind on `admin/registrations/page.tsx`. **Not yet
+done:** every removed/kept page requires a real logged-in session to
+render its actual content (they all sit behind `requireAdmin()`/
+`requireStaff()`/`requireStudent()`), so the visual result - the header
+now reading cleanly with just a title, and every kept drill-down link
+still working - hasn't been clicked through for real (no credentials in
+this sandbox, same limitation noted throughout this file).
+
+## Pre-deployment cleanup pass
+
+A safety-first code-health sweep right before deployment - explicitly
+scoped to avoid touching anything behavior-changing or security-related.
+Searched the whole `apps/web/src` tree for unused code, leftover debug
+statements, commented-out blocks, dead files, and scratch/dev artifacts.
+The codebase came back unusually clean: no `console.log`/`debugger`
+leftovers (the one `console.error` in `signup/actions.ts` is deliberate,
+explained by its own comment), no commented-out code, no stray
+`TODO`/`FIXME`s, and no scratch/dev routes (confirming nothing has crept
+back in since `/dev/audio-recorder-test` was removed - see "Pre-launch
+route cleanup" above).
+
+**Removed** - two entire component files, confirmed unused via
+repo-wide grep (including relative-import paths, not just the `@/`
+alias) before deleting, then re-confirmed with a clean typecheck/lint/
+build afterward:
+- `components/ui/checkbox.tsx` - the shadcn `Checkbox` primitive. No
+  feature in this app uses a checkbox (the exam "certification"
+  toggle and similar controls all use plain native `<input>`s).
+- `components/ui/select.tsx` - the shadcn `Select` primitive. Every
+  dropdown in this app already goes through
+  [`components/ui/native-select.tsx`](apps/web/src/components/ui/native-select.tsx)'s
+  `NativeSelect` instead (8 real usages) - `Select` was scaffolded at
+  some point but never actually wired into anything.
+
+Committed as its own isolated commit (`dba6e38`) - a pure two-file
+deletion, trivially revertible, kept separate from other in-flight
+uncommitted work in this session so it doesn't get tangled up with
+unrelated changes if a rollback is ever needed.
+
+**Deliberately left alone, not because they're used, but because
+removing them isn't worth it this close to deploy:**
+- `CardFooter`/`CardAction` (in `components/ui/card.tsx`) and
+  `DialogClose` (in `components/ui/dialog.tsx`) - genuinely unused by
+  this app's code today, but they're standard, complete parts of
+  shadcn's generated Card/Dialog API surface, not leftover debug
+  scaffolding. Trimming pieces out of an actively-used shared UI file
+  for a few lines of benefit is the kind of edit that's easy to get
+  wrong in a subtle way and cheap to just not do - reported instead of
+  auto-applied, per "when in doubt, leave it and mention it."
+- `badgeVariants`/`buttonVariants` (in `badge.tsx`/`button.tsx`) and
+  `PLACEHOLDER` (in `lib/contact.ts`) - not imported externally, but
+  used internally within their own file and exported deliberately (the
+  standard shadcn "export the cva variant function for downstream
+  reuse" pattern) - not accidental dead code, no action needed.
+
+**Resolved as a follow-up right after this pass:**
+[`components/branded-background.tsx`](apps/web/src/components/branded-background.tsx)
+had briefly been left in a deliberately loud diagnostic state (solid
+vivid red/gold at 50-60% opacity) mid-investigation into an "animation
+invisible" report. Decision: stop chasing that on the dev laptop (the
+loud version already proved, via a direct `curl` of the server-rendered
+HTML independent of any browser, that the mechanism works correctly) and
+verify visually on the deployed site or a phone instead. Reverted back
+to the real, tasteful theme-token version - `foreground`/`accent`/`gold`
+at 10-18% opacity, `blur-2xl` - confirmed live on the running dev server
+via the same `curl` approach.
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean after the
+two deletions (all 29 routes still generate) - checked once before the
+commit and once again fresh afterward. No `package.json` changes needed
+- both deleted files imported from the shared `radix-ui` package, which
+other actively-used components (`Dialog`, the mobile nav drawer) still
+depend on.
+
+## Admin user management (replaces the "Manage" card)
+
+The admin home page's "Manage" card (Registration requests / Courses /
+Classes & enrollments) was pure duplication of three links already in
+the sidebar nav - removed. In its place, `/admin` now has a real users
+table: every profile in the system, searchable/filterable, with role and
+enable/disable controls. The three existing quick-stat cards (Courses,
+Classes, Pending registrations) are unchanged.
+
+**Two things this task asked to "reuse" didn't actually exist yet -
+worth being explicit about, since building them was the real work
+here, not just wiring up a UI:**
+- A general "change any user's role" admin tool. Only
+  `approveRegistration()` existed, and it's deliberately narrow (see its
+  own doc comment) - fires once per pending signup, never offers
+  "admin" as a target role, by design (granting admin has been a
+  deliberately higher-friction, SQL-only action since the Step 3 part 2
+  bootstrap fix - see "Access model (RLS)" above). CLAUDE.md itself had
+  already flagged this exact gap: *"a 'last-admin guard'... doesn't
+  exist anywhere in this codebase... worth building before any future
+  feature that lets an admin edit an arbitrary user's role."* This task
+  is that future feature.
+- An `is_active`/disable mechanism. Didn't exist - `profiles.status` was
+  `pending`/`approved`/`rejected` only, nothing for "temporarily
+  suspended, not a rejected registration."
+
+### `changeUserRole()` - the new general role-change tool
+
+[`(app)/admin/actions.ts`](apps/web/src/app/(app)/admin/actions.ts) -
+new, admin-only, and unlike `approveRegistration()`, **does** allow
+setting `role = 'admin'` directly from the UI. That's a deliberate,
+considered change to this app's trust model, not an oversight: a real
+user-management table is exactly the place a full role-change tool
+belongs, and the two guards below are what make it safe rather than the
+"admin-granting stays SQL-only" restriction itself.
+
+- **Guard 1 - self-demotion is always blocked.** An admin can never
+  remove their own admin role, full stop, not just when they're the
+  last one. `protect_profile_role`'s trigger only has a bootstrap
+  exception for `auth.uid() is null` (service_role/direct SQL) - a
+  signed-in admin acting on themselves has no such escape hatch, so a
+  self-inflicted lockout would be real and hard to reverse without
+  falling back to raw SQL.
+- **Guard 2 - the last remaining admin can't be demoted by anyone.**
+  Counts every `role = 'admin'` row regardless of status (not just
+  approved/active ones) - even a *disabled* admin account is still a
+  recoverable seed for getting admin access back by re-enabling it;
+  losing the role too would mean no path back to admin without raw SQL.
+
+Both guards are enforced in the Server Action (application code), not a
+new RLS policy or trigger - consistent with how this app already draws
+that line (RLS is the broad table-level boundary; specific business
+rules like "never grant admin via the approval flow" already live in
+the action layer, e.g. `approveRegistration()`'s own hardcoded
+allowlist).
+
+### `setUserStatus()` + the new `disabled` status
+
+[`20260921200000_add_disabled_profile_status.sql`](supabase/migrations/20260921200000_add_disabled_profile_status.sql)
+adds `'disabled'` as a fourth `profile_status` enum value. **Zero RLS or
+trigger changes needed anywhere** - `is_approved()` (and every policy
+built from it) already checks `status = 'approved'` literally, so a
+disabled account is locked out of all real data exactly the way a
+pending or rejected one already is; adding the enum value *is* the
+entire access-control fix. This is why "reuse the existing status
+mechanism," even though the literal `disabled` value didn't exist
+before this task, was the right call over adding a separate `is_active`
+boolean - it's one gate, not two overlapping ones to keep in sync.
+**Confirmed as a real, live blocker, not just a theoretical gap**: before
+this migration was applied, clicking Disable in the real app failed with
+`invalid input value for enum profile_status: "disabled"` - exactly what
+you'd expect, since the app code was already complete but the database's
+enum didn't have the value yet. **Still not yet applied to the remote
+project as of this note** - same manual Dashboard SQL-Editor workflow as
+every other migration in this repo (see the Step 8 launch checklist
+below). Run this in the SQL Editor to unblock Disable for real:
+
+```sql
+alter type public.profile_status add value if not exists 'disabled';
+```
+
+`setUserStatus(userId, newStatus)` toggles between `'approved'` and
+`'disabled'` only - a still-`'pending'` row keeps going through
+`approveRegistration()`/`rejectRegistration()` (the dedicated new-signup
+flow, reused as-is in the new table), and a `'rejected'` row is
+re-enabled through this same function (`newStatus: 'approved'`) rather
+than needing a third status value of its own.
+
+- **Guard - an admin can't disable their own account.** Same underlying
+  risk as role-change Guard 1: `protect_profile_role`'s `is_admin()`
+  check would immediately lock them out of undoing it themselves.
+- **Guard - the last remaining *active* admin can't be disabled by
+  anyone else either.** Deliberately narrower than the role-change
+  guard: only counts `role = 'admin' AND status = 'approved'` rows. A
+  disabled-but-still-role-admin row doesn't count here, since the harm
+  being prevented is different - "zero people can currently act as
+  admin" (status-guard), not "the admin role is gone forever"
+  (role-guard). Demoting a *disabled* admin's role, or disabling one of
+  several active admins, is fine and unblocked by either guard.
+
+`/pending`'s status screen now has a third message branch for
+`disabled` ("An admin has disabled this account. Your data is
+preserved...") alongside the existing pending/rejected copy - it was
+already showing generic "Awaiting approval" wording for anything that
+wasn't `'approved'`/`'rejected'`, which would have been actively
+misleading for a disabled account.
+
+### A real correctness check, not just belt-and-suspenders
+
+Both new actions `.select("id")` after their `.update()` and check the
+returned rows, not just the `error` field - the same methodology this
+project's memory/notes already flag: an RLS-blocked `UPDATE` succeeds
+with **zero rows affected**, no error raised. `assertAdmin()` only
+checks the caller's `role` column, not `status` - so if a caller's own
+account were disabled *between* passing that check and the actual
+write, the real backstop is `profiles_update_admin`'s RLS grant
+(`using (is_admin())`, which does require `status = 'approved'`) failing
+silently. Without the affected-rows check, that silent RLS block would
+have come back as `{ error: null }` - a false "success" to a caller who
+was actually just blocked. In practice this requires a same-request
+race (redirects to `/pending` already stop a disabled admin from
+reaching this UI at all under normal navigation), but it's the same
+category of mistake CLAUDE.md's own RLS-verification notes call out, so
+it's worth doing correctly rather than assuming "no error" means "it
+worked."
+
+### The users table itself
+
+[`(app)/admin/page.tsx`](apps/web/src/app/(app)/admin/page.tsx) - a
+plain GET-form search/filter (`?q=` name-or-email substring, `?role=`),
+same "URL query string is the filter state, zero client JS" convention
+the question bank list already established, not a new client-side
+filtering pattern. Rendered as the same flex-row `<li>` list style every
+other admin list in this app already uses (courses, classes,
+registrations) - matching precedent over introducing a real HTML
+`<table>` element this late in the project, for visual/theme
+consistency more than a technical requirement.
+
+Per-row actions depend on status: a `'pending'` row reuses `ApproveForm`
+and `rejectRegistration()` directly from `admin/registrations/` (actual
+reuse, not a re-implementation); every other row gets `RoleChangeForm` +
+`StatusToggleForm`. The signed-in admin's own row gets neither - every
+action either form could take on it would be rejected by a guard above
+anyway, so it shows "Your own account" instead of controls that could
+only ever fail.
+
+Email still comes from the same admin-client `auth.admin.getUserById()`
+per-row lookup the registrations page already uses (`profiles` has no
+email column - it lives on `auth.users`, never exposed via PostgREST).
+Fine at this app's scale; would be worth a bulk lookup if the user base
+ever grew large. No pagination either, same scale assumption already
+made elsewhere in this admin panel (e.g. the courses page's own
+per-course count queries).
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean (all 29
+routes still generate); confirmed `/admin` still redirects a signed-out
+visitor to `/login` rather than erroring. **Not yet done:** the new
+migration hasn't been applied to the remote project, and none of this
+has been exercised with a real admin session yet (search/filter, a role
+change, disabling/re-enabling a user, and - most important to actually
+click through by hand - both new guards: try to demote yourself, and
+with only one admin account, try to demote or disable it) - no
+credentials in this sandbox, same limitation noted throughout this
+file.
+
 ## Progress / plan
 
 - [x] **Step 1** — Verified Node/pnpm/git installed, scaffolded the Turborepo
@@ -2131,16 +2544,93 @@ them clickable.
       been opened in a real logged-in session, and the hand-included
       brand SVGs (this project's `lucide-react` ships no brand icons at
       all) haven't been visually compared against the real logos.
+- [x] **Background animation visibility fix + admin nav grading
+      relocation** (see "Background animation visibility fix + admin nav
+      grading relocation" above): raised the background blobs' opacity
+      and reduced their blur so the existing drift animation - which was
+      already running the whole time - is actually perceptible; confirmed
+      your Windows animation setting is on, so `prefers-reduced-motion`
+      wasn't the cause. Removed "Grading queue" from the admin main nav
+      (kept for teachers) and added a conditional "Grading queue →" link
+      on `/exams` for admins only, so admin grading access is unchanged,
+      just relocated. No schema changes. Code complete, typechecked,
+      linted, and a full production build passes clean. **Not yet done:**
+      no disposable-account walkthrough of the admin/teacher nav
+      difference yet.
+- [x] **Home navigation** (see "Home navigation (logo links back)"
+      above): the app shell's logo now consistently links to `/dashboard`
+      for every role (was previously inconsistent - `/admin` for admins)
+      with a real hover state; `/login` and `/signup` gained a small
+      corner link back to `/` for logged-out visitors. `/`'s own
+      signed-in redirect is unchanged. No schema changes. Code complete,
+      typechecked, linted, and a full production build passes clean, and
+      the `/login`/`/signup` link was confirmed present directly in the
+      raw server-rendered HTML via `curl`. **Not yet done:** the app
+      shell's logo link hasn't been clicked in a real logged-in session
+      for any role.
+- [x] **Redundant back-links removed** (see "Redundant back-links
+      removed" above): four "← Back to X" links that duplicated a
+      sidebar item exactly (`/grades`, `/admin/registrations`,
+      `/admin/courses`, `/admin/classes` - each one's own link back to
+      `/dashboard` or `/admin`) are gone, header markup simplified to
+      match every other link-free top-level page. Every genuine
+      drill-down "up one level to a specific parent" link (exam → exam
+      list, question → question bank, submission → its assignment, one
+      attempt → the grading queue, etc.) was deliberately left alone,
+      since the sidebar doesn't provide that granularity. No schema
+      changes. Code complete, typechecked, linted, and a full production
+      build passes clean. **Not yet done:** no disposable-account
+      walkthrough of the actual rendered headers/links yet.
+- [x] **Pre-deployment cleanup pass** (see "Pre-deployment cleanup pass"
+      above): removed two entirely-unused shadcn component files
+      (`Checkbox`, `Select` - the app uses `NativeSelect` everywhere
+      instead), committed as its own isolated, revertible commit
+      (`dba6e38`). Swept the whole app for debug leftovers, commented-out
+      code, and scratch routes - found none. A handful of unused exports
+      in actively-used shared UI files (`CardFooter`/`CardAction`/
+      `DialogClose`) were deliberately left alone rather than trimmed,
+      being standard shadcn API surface rather than actual debug
+      leftovers. Flagged `branded-background.tsx`'s leftover loud
+      diagnostic state as needing a decision before go-live - resolved
+      immediately after (see "Pre-deployment cleanup pass" above):
+      reverted to the real tasteful theme-token version, decision made
+      to verify visually on the deployed site/a phone rather than keep
+      chasing it on the dev laptop.
+- [x] **Admin user management** (see "Admin user management" above):
+      replaced the admin home's redundant "Manage" card (duplicated the
+      sidebar exactly) with a real, searchable/filterable users table -
+      every profile in the system, with role changes (now including
+      granting admin via UI, a deliberate trust-model change) and a new
+      enable/disable (suspend, not delete) control. Built the general
+      role-change tool and the last-admin/self-demotion guards CLAUDE.md
+      had already flagged as not existing yet - this was the real work,
+      not just a UI layer on top of something pre-built. New `disabled`
+      `profile_status` value reuses the existing `is_approved()` gate
+      with zero RLS/trigger changes. Code complete, typechecked, linted,
+      and a full production build passes clean; both new Server Actions
+      verify actual affected rows after their `UPDATE`, not just the
+      absence of an error. **Confirmed live**: clicking Disable before
+      the migration was applied failed with exactly the expected
+      `invalid input value for enum profile_status: "disabled"` error -
+      the app code was already correct, only the database enum was
+      missing the value. **Not yet done:** the migration still hasn't
+      been applied to the remote project (see "Admin user management"
+      above for the one-line SQL to run), and once it is, neither new
+      safety guard has been exercised with a real admin session yet.
 - [ ] **Step 8 (before go-live)** — Launch checklist:
-  - [ ] **Final security pass.** Three migrations are written and tested
+  - [ ] **Final security pass.** Four migrations are written and tested
         locally but not yet applied to the remote project - apply them
         via the Dashboard SQL Editor (this repo's established workflow,
         since the Supabase CLI isn't linked):
         [`20260717170000_add_speaking_answers_teacher_policy.sql`](supabase/migrations/20260717170000_add_speaking_answers_teacher_policy.sql),
         [`20260717180000_add_assignment_audio.sql`](supabase/migrations/20260717180000_add_assignment_audio.sql),
+        [`20260717190000_add_registration_approval.sql`](supabase/migrations/20260717190000_add_registration_approval.sql),
         and
-        [`20260717190000_add_registration_approval.sql`](supabase/migrations/20260717190000_add_registration_approval.sql).
-        That last one is the self-registration/approval RLS change -
+        [`20260921200000_add_disabled_profile_status.sql`](supabase/migrations/20260921200000_add_disabled_profile_status.sql)
+        (adds the `disabled` status the new admin users table's
+        enable/disable control needs - see "Admin user management"
+        above). That third one is the self-registration/approval RLS
+        change -
         **the least-verified feature in the app** (see "Self-registration
         & admin approval" above) - review it closely and walk through it
         with a disposable account before trusting it with real signups.
