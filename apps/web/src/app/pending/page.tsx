@@ -35,20 +35,32 @@ export default async function PendingPage() {
   }
 
   const isRejected = profile?.status === "rejected";
+  const isDisabled = profile?.status === "disabled";
+
+  const title = isDisabled
+    ? "Account disabled"
+    : isRejected
+      ? "Registration not approved"
+      : "Awaiting approval";
+  const description = isDisabled
+    ? "An admin has disabled this account. Your data is preserved, but you can't access the app while it's disabled - contact your school admin if you think this is a mistake."
+    : isRejected
+      ? "An admin reviewed this registration and did not approve it. If you think this is a mistake, contact your school admin."
+      : "Your account is waiting for an admin to review and approve it. You'll be able to see your classes, assignments, and exams as soon as that happens - there's nothing else to do in the meantime.";
 
   return (
     <div className="flex flex-1 items-center justify-center px-4 py-12">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            {isRejected ? "Registration not approved" : "Awaiting approval"}
-            <Badge variant={isRejected ? "destructive" : "secondary"}>{profile?.status ?? "pending"}</Badge>
+            {title}
+            <Badge variant={isRejected || isDisabled ? "destructive" : "secondary"}>
+              {profile?.status ?? "pending"}
+            </Badge>
           </CardTitle>
           <CardDescription>
             {profile?.full_name ? `Hi ${profile.full_name} - ` : ""}
-            {isRejected
-              ? "An admin reviewed this registration and did not approve it. If you think this is a mistake, contact your school admin."
-              : "Your account is waiting for an admin to review and approve it. You'll be able to see your classes, assignments, and exams as soon as that happens - there's nothing else to do in the meantime."}
+            {description}
           </CardDescription>
         </CardHeader>
         <CardContent>

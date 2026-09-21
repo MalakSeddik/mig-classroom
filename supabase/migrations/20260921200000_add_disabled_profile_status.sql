@@ -1,0 +1,12 @@
+-- Admin user management: let an admin suspend ("disable") an account
+-- instead of deleting it - all their data (grades, submissions,
+-- attendance, exam attempts, recordings) stays intact, but they're
+-- immediately locked out of every real table, exactly the same way a
+-- pending or rejected account already is.
+--
+-- Zero RLS or trigger changes needed anywhere: is_approved() (and every
+-- policy built from it - see 20260717190000_add_registration_approval.sql)
+-- already checks `status = 'approved'` literally. 'disabled' fails that
+-- check automatically, the same way 'pending'/'rejected' already do -
+-- adding this value is the entire fix.
+alter type public.profile_status add value if not exists 'disabled';
