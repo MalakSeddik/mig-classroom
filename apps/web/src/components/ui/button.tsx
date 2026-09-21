@@ -58,6 +58,10 @@ function Button({
       data-slot="button"
       data-variant={variant}
       data-size={size}
+      // Same extension-injected fdprocessedid attribute as Input/
+      // NativeSelect (see Input's own comment) - a real post-SSR DOM
+      // mutation, not an app bug.
+      suppressHydrationWarning
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />
