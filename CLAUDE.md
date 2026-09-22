@@ -2425,6 +2425,92 @@ component, already verified working on the landing page - hasn't been
 seen in a real logged-in session (no credentials in this sandbox, same
 limitation noted throughout this file).
 
+## Vercel deployment (Step 8)
+
+First real deployment attempt: pushed to Vercel with **Root Directory**
+set to `apps/web` (correct for this repo layout - don't change it). The
+build succeeded and printed the normal full route table, but the
+deployed URL 404'd on every route, including `/`.
+
+### Diagnosis: build succeeding and serving working are two different things
+
+A successful `next build` log is just Next's own compiler output - it
+happens regardless of how Vercel's platform is configured to *serve*
+that output afterward. The actual cause was almost certainly **Framework
+Preset silently stuck on "Other"**: when a monorepo is first imported,
+Vercel tries to auto-detect the framework at the *true repo root*, which
+for this project is the Turborepo root (`turbo.json`,
+`pnpm-workspace.yaml`, no `next.config.ts`) - nothing there for it to
+detect. **Setting "Root Directory" to `apps/web` afterward does not
+retroactively re-run that detection or fix Framework Preset** - it's a
+separate setting that just stays wherever it landed. With it stuck on
+"Other," Vercel skips all Next.js-specific handling (per-route
+serverless functions, middleware, the routing manifest) and just tries
+to serve "Output Directory" as plain static files - so `next build`
+keeps succeeding and printing routes (the build step doesn't care about
+Framework Preset at all), while every request 404s, since nothing told
+Vercel's serving layer this output is a Next.js app in the first place.
+
+Checked the repo itself first, to rule out anything in code before
+pointing at dashboard settings: no `vercel.json` anywhere (repo root or
+`apps/web`), no `.vercel` link folder (this project was connected via
+Vercel's GitHub integration in the dashboard, never `vercel` CLI/`vercel
+link` locally), `next.config.ts` has no `output`/`basePath`/
+`assetPrefix` weirdness, and `turbo.json`'s build `outputs` field is
+just Turbo's own local-caching config - it has no bearing on what Vercel
+actually serves, since Vercel runs `next build` directly and serves
+whatever Next produces, independent of Turbo's cache bookkeeping.
+
+### The fix: pin Framework Preset in code, not just in the dashboard
+
+[`apps/web/vercel.json`](apps/web/vercel.json) - new, minimal on
+purpose:
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs"
+}
+```
+
+Deliberately does **not** set `buildCommand`/`installCommand`/
+`outputDirectory` - once Framework is correctly identified as Next.js,
+Vercel's own zero-config Turborepo+pnpm monorepo detection already
+handles all three correctly (install from the true repo root even
+though Root Directory is a subfolder, `next build`, `.next` relative to
+Root Directory). Overriding any of those by hand is exactly the kind of
+thing that causes this class of bug in the first place - a stale
+override left over from before Root Directory was set correctly. Lives
+in `apps/web`, not the repo root, since Vercel resolves `vercel.json`
+relative to Root Directory.
+
+This value should also be set directly in the dashboard (**Settings →
+General → Build & Development Settings → Framework Preset → Next.js**),
+since a setting stuck at the wrong value from initial import doesn't fix
+itself - but committing it here means it can't silently drift back via
+a future dashboard misclick, and it's visible/reviewable in git instead
+of hidden in a UI toggle only one person can see.
+
+### Also checked, confirmed not overridden
+
+Output Directory, Build Command, and Install Command in the same
+dashboard section - all should stay on their framework-detected
+defaults (`.next` relative to Root Directory, `next build`, and
+Vercel's own pnpm-aware install respectively). Any of these being
+manually overridden with a path that made sense before Root Directory
+was set to `apps/web` (e.g. `apps/web/.next` as an Output Directory
+override, now resolving to the nonexistent `apps/web/apps/web/.next`)
+would independently cause this exact same blanket-404 symptom.
+
+### Verified
+
+Confirmed `apps/web/vercel.json` is valid JSON. **Not yet done:** the
+actual fix depends on the Framework Preset dashboard setting (and
+confirming no other override is stuck) being corrected and a fresh
+deployment triggered - can't be verified from here without a live
+Vercel session; watch the next deployment's URL directly after pushing
+this file and updating the dashboard setting.
+
 ## Progress / plan
 
 - [x] **Step 1** — Verified Node/pnpm/git installed, scaffolded the Turborepo
@@ -2731,7 +2817,16 @@ limitation noted throughout this file).
         dev-server cross-origin bugs found and fixed there) - this item
         is specifically about the newer wiring layered on top, which has
         only ever run in this sandbox (no microphone here) so far.
-  - [ ] Vercel deployment.
+  - [ ] **Vercel deployment - in progress.** First attempt built
+        successfully but 404'd on every route; diagnosed as Framework
+        Preset likely stuck on "Other" from initial monorepo import
+        (Root Directory being set to `apps/web` afterward doesn't
+        retroactively fix it) - see "Vercel deployment (Step 8)" above.
+        Fix: `apps/web/vercel.json` now pins `"framework": "nextjs"` in
+        code; still needs the dashboard's Framework Preset set to
+        Next.js (and Output/Build/Install Command overrides confirmed
+        clear) and a fresh deployment to actually confirm resolved -
+        can't be verified without a live Vercel session.
 
 Brand theme (logo, palette, shadcn setup) was done as an unnumbered
 detour between Step 1 and Step 2 — see the "Brand theme" section above.
