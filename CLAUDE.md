@@ -2385,6 +2385,46 @@ with only one admin account, try to demote or disable it) - no
 credentials in this sandbox, same limitation noted throughout this
 file.
 
+## "Powered by ETCH Group" signature
+
+A quiet credit line, not a second brand - deliberately the most muted
+text anywhere it appears, so it never competes with MIG's own branding.
+No schema changes, no new routes.
+
+- [`lib/contact.ts`](apps/web/src/lib/contact.ts) gained a second config
+  block, `SIGNATURE` (`label: "ETCH Group"`, `url`) +
+  `getSignature()`, right alongside the existing `CONTACT`/
+  `getContactLinks()` - same single-source-of-truth reasoning, same
+  placeholder-aware shape: `url` is currently `"REPLACE_ME"`, and
+  `getSignature()` reports `href: null` until it's replaced with
+  ETCH's real site.
+- [`components/powered-by-signature.tsx`](apps/web/src/components/powered-by-signature.tsx)
+  is the new `<PoweredBySignature>` component - plain, non-clickable
+  text (`text-[11px] text-muted-foreground/60`) while the URL is still
+  a placeholder, or a real `target="_blank"` link once one is set -
+  exactly the same placeholder-aware rendering pattern
+  `<ContactLinks>` already established for the social icons.
+- Appears in two places, both reading from the same component:
+  - [`app/page.tsx`](apps/web/src/app/page.tsx)'s landing footer, as a
+    third line under the existing copyright text (below the contact
+    icons).
+  - [`components/app-shell.tsx`](apps/web/src/components/app-shell.tsx)'s
+    `userFooter`, right under `<LogoutButton>` - the very bottom of the
+    sidebar, rendered twice (desktop sidebar + mobile drawer) the same
+    way `<SupportDialog>`/`<LogoutButton>` already are, so it appears
+    consistently for every role without any role-specific wiring.
+
+### Verified
+
+TypeScript, ESLint, and a full production build all pass clean.
+Confirmed directly in the raw server-rendered HTML (`curl`, not just
+the source) that the landing page renders `Powered by ETCH Group` as a
+plain non-linked `<p>` tag, exactly as expected while the URL is still a
+placeholder. **Not yet done:** the app shell footer's copy - the same
+component, already verified working on the landing page - hasn't been
+seen in a real logged-in session (no credentials in this sandbox, same
+limitation noted throughout this file).
+
 ## Progress / plan
 
 - [x] **Step 1** — Verified Node/pnpm/git installed, scaffolded the Turborepo
@@ -2617,6 +2657,17 @@ file.
       been applied to the remote project (see "Admin user management"
       above for the one-line SQL to run), and once it is, neither new
       safety guard has been exercised with a real admin session yet.
+- [x] **"Powered by ETCH Group" signature** (see "'Powered by ETCH
+      Group' signature" above): a new shared `<PoweredBySignature>`
+      component, config'd alongside the existing contact links in
+      `lib/contact.ts` (same placeholder-aware pattern - plain text
+      until a real URL replaces `"REPLACE_ME"`), added to the landing
+      page footer and the app shell's own footer (every role, desktop +
+      mobile). No schema changes. Code complete, typechecked, linted,
+      and a full production build passes clean; the landing page's
+      rendering was confirmed directly in the raw server-rendered HTML.
+      **Not yet done:** the app shell footer's copy hasn't been seen in
+      a real logged-in session.
 - [ ] **Step 8 (before go-live)** — Launch checklist:
   - [ ] **Final security pass.** Four migrations are written and tested
         locally but not yet applied to the remote project - apply them
@@ -2664,7 +2715,11 @@ file.
         TikTok/Instagram/Facebook links, a real WhatsApp number, and a
         real support email - until then, all five contact icons render
         disabled ("Coming soon") on the landing footer and in the
-        Support dialog.
+        Support dialog. Also has a sixth placeholder now,
+        `SIGNATURE.url` (see "'Powered by ETCH Group' signature" above)
+        - leave it as `"REPLACE_ME"` if ETCH has no site to link to yet;
+        it renders as plain non-clickable text either way, so there's no
+        broken-link risk in leaving it unset past launch.
   - [ ] Real-device iPhone microphone test, over HTTPS, for the two
         speaking integrations built on top of `<AudioRecorder>` since its
         original device pass: the exam mic-check gate + `skipMicTest`
