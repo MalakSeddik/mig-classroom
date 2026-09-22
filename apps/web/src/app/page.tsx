@@ -5,6 +5,7 @@ import { getCurrentProfile } from "@/lib/supabase/current-user";
 import { Button } from "@/components/ui/button";
 import { BrandedBackground } from "@/components/branded-background";
 import { ContactLinks } from "@/components/contact-links";
+import { PoweredBySignature } from "@/components/powered-by-signature";
 
 /**
  * The public front door. A signed-in visitor is sent straight to
@@ -52,9 +53,12 @@ export default async function Home() {
 
       <footer className="flex flex-col items-center gap-3 border-t border-border/60 px-6 py-6">
         <ContactLinks />
-        <p className="text-xs text-muted-foreground">
-          &copy; {new Date().getFullYear()} MIG Classroom. All rights reserved.
-        </p>
+        <div className="flex flex-col items-center gap-1">
+          <p className="text-xs text-muted-foreground">
+            &copy; {new Date().getFullYear()} MIG Classroom. All rights reserved.
+          </p>
+          <PoweredBySignature />
+        </div>
       </footer>
     </div>
   );

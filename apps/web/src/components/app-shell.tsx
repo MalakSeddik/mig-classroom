@@ -21,6 +21,7 @@ import {
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LogoutButton } from "@/components/logout-button";
 import { SupportDialog } from "@/components/support-dialog";
+import { PoweredBySignature } from "@/components/powered-by-signature";
 import { cn } from "@/lib/utils";
 import type { CurrentProfile } from "@/lib/supabase/current-user";
 
@@ -156,6 +157,9 @@ export function AppShell({
       <div className="flex flex-col gap-2 px-2">
         <SupportDialog />
         <LogoutButton />
+      </div>
+      <div className="px-2">
+        <PoweredBySignature />
       </div>
     </div>
   );

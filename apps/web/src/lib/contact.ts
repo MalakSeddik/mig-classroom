@@ -58,3 +58,20 @@ export function getContactLinks(): ContactLink[] {
     };
   });
 }
+
+// The quiet "Powered by ETCH Group" credit shown on the landing page
+// footer and the app shell footer - see <PoweredBySignature>. Same
+// placeholder-aware shape as CONTACT above: leave `url` as PLACEHOLDER
+// until ETCH has a real site to link to.
+export const SIGNATURE = {
+  label: "ETCH Group",
+  url: "REPLACE_ME", // full URL, e.g. "https://etchgroup.com"
+} as const;
+
+export function getSignature(): { label: string; href: string | null } {
+  const isPlaceholder = !SIGNATURE.url || SIGNATURE.url === PLACEHOLDER;
+  return {
+    label: SIGNATURE.label,
+    href: isPlaceholder ? null : SIGNATURE.url,
+  };
+}
